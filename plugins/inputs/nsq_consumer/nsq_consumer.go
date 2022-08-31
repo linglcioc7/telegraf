@@ -15,6 +15,7 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
@@ -34,9 +35,8 @@ func (l *logger) Output(_ int, s string) error {
 	return nil
 }
 
-//NSQConsumer represents the configuration of the plugin
+// NSQConsumer represents the configuration of the plugin
 type NSQConsumer struct {
-	Server      string   `toml:"server" deprecated:"1.5.0;use 'nsqd' instead"`
 	Nsqd        []string `toml:"nsqd"`
 	Nsqlookupd  []string `toml:"nsqlookupd"`
 	Topic       string   `toml:"topic"`
@@ -105,11 +105,6 @@ func (n *NSQConsumer) Start(ac telegraf.Accumulator) error {
 		message.DisableAutoResponse()
 		return nil
 	}))
-
-	// For backward compatibility
-	if n.Server != "" {
-		n.Nsqd = append(n.Nsqd, n.Server)
-	}
 
 	// Check if we have anything to connect to
 	if len(n.Nsqlookupd) == 0 && len(n.Nsqd) == 0 {

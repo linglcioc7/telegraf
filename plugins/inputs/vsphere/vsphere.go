@@ -16,6 +16,7 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
@@ -66,7 +67,6 @@ type VSphere struct {
 	MaxQueryMetrics         int
 	CollectConcurrency      int
 	DiscoverConcurrency     int
-	ForceDiscoverOnInit     bool `toml:"force_discover_on_init" deprecated:"1.14.0;option is ignored"`
 	ObjectDiscoveryInterval config.Duration
 	Timeout                 config.Duration
 	HistoricalInterval      config.Duration
@@ -191,7 +191,6 @@ func init() {
 			CollectConcurrency:      1,
 			DiscoverConcurrency:     1,
 			MetricLookback:          3,
-			ForceDiscoverOnInit:     true,
 			ObjectDiscoveryInterval: config.Duration(time.Second * 300),
 			Timeout:                 config.Duration(time.Second * 60),
 			HistoricalInterval:      config.Duration(time.Second * 300),

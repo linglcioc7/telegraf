@@ -17,11 +17,11 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
 type FileCount struct {
-	Directory      string `toml:"directory" deprecated:"1.9.0;use 'directories' instead"`
 	Directories    []string
 	Name           string
 	Recursive      bool
@@ -243,10 +243,6 @@ func (fc *FileCount) getDirs() []string {
 		dirs[i] = filepath.Clean(dir)
 	}
 
-	if fc.Directory != "" {
-		dirs = append(dirs, filepath.Clean(fc.Directory))
-	}
-
 	return dirs
 }
 
@@ -264,7 +260,6 @@ func (fc *FileCount) initGlobPaths(acc telegraf.Accumulator) {
 
 func NewFileCount() *FileCount {
 	return &FileCount{
-		Directory:      "",
 		Directories:    []string{},
 		Name:           "*",
 		Recursive:      true,

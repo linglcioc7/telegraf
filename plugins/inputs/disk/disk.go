@@ -12,13 +12,12 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
 type DiskStats struct {
 	ps system.PS
-
-	LegacyMountPoints []string `toml:"mountpoints" deprecated:"0.10.2;2.0.0;use 'mount_points' instead"`
 
 	MountPoints     []string `toml:"mount_points"`
 	IgnoreFS        []string `toml:"ignore_fs"`
@@ -32,11 +31,6 @@ func (*DiskStats) SampleConfig() string {
 }
 
 func (ds *DiskStats) Init() error {
-	// Legacy support:
-	if len(ds.LegacyMountPoints) != 0 {
-		ds.MountPoints = ds.LegacyMountPoints
-	}
-
 	ps := system.NewSystemPS()
 	ps.Log = ds.Log
 	ds.ps = ps

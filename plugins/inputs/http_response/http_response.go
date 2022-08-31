@@ -23,6 +23,7 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
@@ -34,7 +35,6 @@ const (
 
 // HTTPResponse struct
 type HTTPResponse struct {
-	Address         string   `toml:"address" deprecated:"1.12.0;use 'urls' instead"`
 	URLs            []string `toml:"urls"`
 	HTTPProxy       string   `toml:"http_proxy"`
 	Body            string
@@ -349,11 +349,7 @@ func (h *HTTPResponse) Gather(acc telegraf.Accumulator) error {
 	}
 
 	if len(h.URLs) == 0 {
-		if h.Address == "" {
-			h.URLs = []string{"http://localhost"}
-		} else {
-			h.URLs = []string{h.Address}
-		}
+		h.URLs = []string{"http://localhost"}
 	}
 
 	if h.client == nil {

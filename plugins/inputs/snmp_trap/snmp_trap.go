@@ -20,6 +20,7 @@ import (
 var defaultTimeout = config.Duration(time.Second * 5)
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
@@ -28,11 +29,10 @@ type translator interface {
 }
 
 type SnmpTrap struct {
-	ServiceAddress string          `toml:"service_address"`
-	Timeout        config.Duration `toml:"timeout" deprecated:"1.20.0;unused option"`
-	Version        string          `toml:"version"`
-	Translator     string          `toml:"-"`
-	Path           []string        `toml:"path"`
+	ServiceAddress string   `toml:"service_address"`
+	Version        string   `toml:"version"`
+	Translator     string   `toml:"-"`
+	Path           []string `toml:"path"`
 
 	// Settings for version 3
 	// Values: "noAuthNoPriv", "authNoPriv", "authPriv"
@@ -70,7 +70,6 @@ func init() {
 		return &SnmpTrap{
 			timeFunc:       time.Now,
 			ServiceAddress: "udp://:162",
-			Timeout:        defaultTimeout,
 			Path:           []string{"/usr/share/snmp/mibs"},
 			Version:        "2c",
 		}
@@ -90,7 +89,7 @@ func (s *SnmpTrap) Init() error {
 			return err
 		}
 	case "netsnmp":
-		s.translator = newNetsnmpTranslator(s.Timeout)
+		s.translator = newNetsnmpTranslator()
 	default:
 		return fmt.Errorf("invalid translator value")
 	}

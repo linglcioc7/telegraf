@@ -4,7 +4,6 @@ package mongodb
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	_ "embed"
 	"fmt"
 	"net/url"
@@ -22,12 +21,12 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
 type MongoDB struct {
 	Servers             []string
-	Ssl                 Ssl
 	GatherClusterStatus bool
 	GatherPerdbStats    bool
 	GatherColStats      bool
@@ -40,39 +39,16 @@ type MongoDB struct {
 	clients []*Server
 }
 
-type Ssl struct {
-	Enabled bool     `toml:"ssl_enabled" deprecated:"1.3.0;use 'tls_*' options instead"`
-	CaCerts []string `toml:"cacerts" deprecated:"1.3.0;use 'tls_ca' instead"`
-}
-
 func (*MongoDB) SampleConfig() string {
 	return sampleConfig
 }
 
 func (m *MongoDB) Init() error {
 	var tlsConfig *tls.Config
-	if m.Ssl.Enabled {
-		// Deprecated TLS config
-		tlsConfig = &tls.Config{
-			InsecureSkipVerify: m.ClientConfig.InsecureSkipVerify,
-		}
-		if len(m.Ssl.CaCerts) == 0 {
-			return fmt.Errorf("you must explicitly set insecure_skip_verify to skip cerificate validation")
-		}
-
-		roots := x509.NewCertPool()
-		for _, caCert := range m.Ssl.CaCerts {
-			if ok := roots.AppendCertsFromPEM([]byte(caCert)); !ok {
-				return fmt.Errorf("failed to parse root certificate")
-			}
-		}
-		tlsConfig.RootCAs = roots
-	} else {
-		var err error
-		tlsConfig, err = m.ClientConfig.TLSConfig()
-		if err != nil {
-			return err
-		}
+	var err error
+	tlsConfig, err = m.ClientConfig.TLSConfig()
+	if err != nil {
+		return err
 	}
 
 	if len(m.Servers) == 0 {

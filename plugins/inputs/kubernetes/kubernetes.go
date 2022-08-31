@@ -18,6 +18,7 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
@@ -26,9 +27,7 @@ type Kubernetes struct {
 	URL string
 
 	// Bearer Token authorization file path
-	BearerToken       string `toml:"bearer_token"`
-	BearerTokenString string `toml:"bearer_token_string" deprecated:"1.24.0;use 'BearerToken' with a file instead"`
-
+	BearerToken  string   `toml:"bearer_token"`
 	LabelInclude []string `toml:"label_include"`
 	LabelExclude []string `toml:"label_exclude"`
 
@@ -61,7 +60,7 @@ func (*Kubernetes) SampleConfig() string {
 
 func (k *Kubernetes) Init() error {
 	// If neither are provided, use the default service account.
-	if k.BearerToken == "" && k.BearerTokenString == "" {
+	if k.BearerToken == "" {
 		k.BearerToken = defaultServiceAccountPath
 	}
 
@@ -74,7 +73,7 @@ func (k *Kubernetes) Init() error {
 	return nil
 }
 
-//Gather collects kubernetes metrics from a given URL
+// Gather collects kubernetes metrics from a given URL
 func (k *Kubernetes) Gather(acc telegraf.Accumulator) error {
 	acc.AddError(k.gatherSummary(k.URL, acc))
 	return nil
@@ -178,14 +177,14 @@ func (k *Kubernetes) LoadJSON(url string, v interface{}) error {
 			ResponseHeaderTimeout: time.Duration(k.ResponseTimeout),
 		}
 	}
+	var token []byte
 	if k.BearerToken != "" {
-		token, err := os.ReadFile(k.BearerToken)
+		token, err = os.ReadFile(k.BearerToken)
 		if err != nil {
 			return err
 		}
-		k.BearerTokenString = strings.TrimSpace(string(token))
 	}
-	req.Header.Set("Authorization", "Bearer "+k.BearerTokenString)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	req.Header.Add("Accept", "application/json")
 	resp, err = k.RoundTripper.RoundTrip(req)
 	if err != nil {

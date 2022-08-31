@@ -40,6 +40,7 @@ import (
 )
 
 // DO NOT REMOVE THE NEXT TWO LINES! This is required to embed the sampleConfig data.
+//
 //go:embed sample.conf
 var sampleConfig string
 
@@ -232,9 +233,6 @@ func clientStats(c ClientStats, acc telegraf.Accumulator, host, version, topic, 
 		"client_snappy":     strconv.FormatBool(c.Snappy),
 		"client_deflate":    strconv.FormatBool(c.Deflate),
 	}
-	if len(c.Name) > 0 {
-		tags["client_name"] = c.Name
-	}
 
 	fields := map[string]interface{}{
 		"ready_count":    c.ReadyCount,
@@ -284,7 +282,6 @@ type ChannelStats struct {
 }
 
 type ClientStats struct {
-	Name                          string `json:"name"` // DEPRECATED 1.x+, still here as the structs are currently being shared for parsing v3.x and 1.x
 	ID                            string `json:"client_id"`
 	Hostname                      string `json:"hostname"`
 	Version                       string `json:"version"`
