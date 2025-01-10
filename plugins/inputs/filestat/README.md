@@ -1,6 +1,11 @@
-# Filestat Input Plugin
+# File statistics Input Plugin
 
-The filestat plugin gathers metrics about file existence, size, and other stats.
+This plugin gathers metrics about file existence, size, and other file
+statistics.
+
+⭐ Telegraf v0.13.0
+🏷️ system
+💻 all
 
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
@@ -42,9 +47,7 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
 ## Example Output
 
-```shell
-$ telegraf --config /etc/telegraf/telegraf.conf --input-filter filestat --test
-* Plugin: filestat, Collection 1
-> filestat,file=/tmp/foo/bar,host=tyrion exists=0i 1507218518192154351
-> filestat,file=/Users/sparrc/ws/telegraf.conf,host=tyrion exists=1i,size=47894i,modification_time=1507152973123456789i  1507218518192154351
+```text
+filestat,file=/tmp/foo/bar,host=tyrion exists=0i 1507218518192154351
+filestat,file=/Users/sparrc/ws/telegraf.conf,host=tyrion exists=1i,size=47894i,modification_time=1507152973123456789i  1507218518192154351
 ```

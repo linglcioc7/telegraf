@@ -18,6 +18,17 @@ receive a 200 OK response with message body `{"results":[]}` but they are not
 relayed. The output configuration of the Telegraf instance which ultimately
 submits data to InfluxDB determines the destination database.
 
+## Service Input <!-- @/docs/includes/service_input.md -->
+
+This plugin is a service input. Normal plugins gather metrics determined by the
+interval setting. Service plugins start a service to listens and waits for
+metrics or events to occur. Service plugins have two key differences from
+normal plugins:
+
+1. The global or plugin specific `interval` setting may not apply
+2. The CLI options of `--test`, `--test-wait`, and `--once` may not produce
+   output for this plugin
+
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
 In addition to the plugin-specific configuration settings, plugins support
@@ -44,10 +55,6 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## 0 means to use the default of 32MiB.
   max_body_size = 0
 
-  ## Maximum line size allowed to be sent in bytes.
-  ##   deprecated in 1.14; parser now handles lines of unlimited length and option is ignored
-  # max_line_size = 0
-
   ## Set one or more allowed client CA certificate file names to
   ## enable mutually authenticated TLS connections
   tls_allowed_cacerts = ["/etc/telegraf/clientca.pem"]
@@ -68,10 +75,22 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## the value of this tag name.
   # retention_policy_tag = ""
 
-  ## Optional username and password to accept for HTTP basic authentication.
+  ## Optional username and password to accept for HTTP basic authentication
+  ## or authentication token.
   ## You probably want to make sure you have TLS configured above for this.
+  ## Use these options for the authentication token in the form
+  ##   Authentication: Token <basic_username>:<basic_password>
   # basic_username = "foobar"
   # basic_password = "barfoo"
+
+  ## Optional JWT token authentication for HTTP requests
+  ## Please see the documentation at
+  ##   https://docs.influxdata.com/influxdb/v1.8/administration/authentication_and_authorization/#authenticate-using-jwt-tokens
+  ## for further details.
+  ## Please note: Token authentication and basic authentication cannot be used
+  ##              at the same time.
+  # token_shared_secret = ""
+  # token_username = ""
 
   ## Influx line protocol parser
   ## 'internal' is the default. 'upstream' is a newer parser that is faster

@@ -82,14 +82,14 @@ func (r *Riemann) Write(metrics []telegraf.Metric) error {
 	}
 
 	if err := r.client.SendMulti(events); err != nil {
-		r.Close() //nolint:revive // There is another error which will be returned here
+		r.Close()
 		return fmt.Errorf("failed to send riemann message: %w", err)
 	}
 	return nil
 }
 
 func (r *Riemann) buildRiemannEvents(m telegraf.Metric) []*raidman.Event {
-	events := []*raidman.Event{}
+	events := make([]*raidman.Event, 0, len(m.Fields()))
 	for fieldName, value := range m.Fields() {
 		// get host for Riemann event
 		host, ok := m.Tags()["host"]
@@ -141,7 +141,7 @@ func (r *Riemann) attributes(name string, tags map[string]string) map[string]str
 	return tags
 }
 
-func (r *Riemann) service(name string, field string) string {
+func (r *Riemann) service(name, field string) string {
 	var serviceStrings []string
 
 	// if measurement is not enabled as an attribute then prepend it to service name

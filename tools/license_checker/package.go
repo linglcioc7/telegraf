@@ -24,6 +24,11 @@ func (pkg *packageInfo) ToSPDX() {
 }
 
 func (pkg *packageInfo) Classify() (float64, error) {
+	// Check for a valid SPDX
+	if pkg.spdx == "" {
+		return 0.0, fmt.Errorf("empty SPDX for license %q", pkg.license)
+	}
+
 	// Download the license text
 	source, err := normalizeURL(pkg.url)
 	if err != nil {
@@ -31,7 +36,7 @@ func (pkg *packageInfo) Classify() (float64, error) {
 	}
 	debugf("%q downloading from %q", pkg.name, source)
 
-	response, err := http.Get(source)
+	response, err := http.Get(source.String())
 	if err != nil {
 		return 0.0, fmt.Errorf("download from %q failed: %w", source, err)
 	}
@@ -62,10 +67,10 @@ func (pkg *packageInfo) Classify() (float64, error) {
 	return coverage.Percent, nil
 }
 
-func normalizeURL(raw string) (string, error) {
+func normalizeURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	switch u.Hostname() {
@@ -93,5 +98,5 @@ func normalizeURL(raw string) (string, error) {
 		u.RawQuery = strings.Join(parts, ";")
 	}
 
-	return u.String(), nil
+	return u, nil
 }

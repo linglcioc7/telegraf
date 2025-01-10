@@ -36,6 +36,7 @@ type Parser struct {
 	DefaultTags map[string]string `toml:"-"`
 	Log         telegraf.Logger   `toml:"-"`
 
+	location     *time.Location
 	tagFilter    filter.Filter
 	stringFilter filter.Filter
 }
@@ -86,16 +87,16 @@ func (p *Parser) parseObject(data map[string]interface{}, timestamp time.Time) (
 	// if time key is specified, set timestamp to it
 	if p.TimeKey != "" {
 		if p.TimeFormat == "" {
-			err := fmt.Errorf("use of 'json_time_key' requires 'json_time_format'")
+			err := errors.New("use of 'json_time_key' requires 'json_time_format'")
 			return nil, err
 		}
 
 		if f.Fields[p.TimeKey] == nil {
-			err := fmt.Errorf("JSON time key could not be found")
+			err := errors.New("'json_time_key' could not be found")
 			return nil, err
 		}
 
-		timestamp, err = internal.ParseTimestamp(p.TimeFormat, f.Fields[p.TimeKey], p.Timezone)
+		timestamp, err = internal.ParseTimestamp(p.TimeFormat, f.Fields[p.TimeKey], p.location)
 		if err != nil {
 			return nil, err
 		}
@@ -169,6 +170,14 @@ func (p *Parser) Init() error {
 		return fmt.Errorf("compiling tag-key filter failed: %w", err)
 	}
 
+	if p.Timezone != "" {
+		loc, err := time.LoadLocation(p.Timezone)
+		if err != nil {
+			return fmt.Errorf("invalid timezone: %w", err)
+		}
+		p.location = loc
+	}
+
 	return nil
 }
 
@@ -236,19 +245,4 @@ func init() {
 				Strict:     true,
 			}
 		})
-}
-
-func (p *Parser) InitFromConfig(config *parsers.Config) error {
-	p.MetricName = config.MetricName
-	p.TagKeys = config.TagKeys
-	p.NameKey = config.JSONNameKey
-	p.StringFields = config.JSONStringFields
-	p.Query = config.JSONQuery
-	p.TimeKey = config.JSONTimeKey
-	p.TimeFormat = config.JSONTimeFormat
-	p.Timezone = config.JSONTimezone
-	p.Strict = config.JSONStrict
-	p.DefaultTags = config.DefaultTags
-
-	return p.Init()
 }

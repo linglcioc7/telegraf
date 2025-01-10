@@ -10,7 +10,7 @@ import (
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/metric"
-	"github.com/influxdata/telegraf/plugins/serializers"
+	"github.com/influxdata/telegraf/plugins/serializers/influx"
 	"github.com/influxdata/telegraf/testutil"
 )
 
@@ -28,12 +28,14 @@ func TestOutputShim(t *testing.T) {
 
 	wg.Add(1)
 	go func() {
-		err := s.RunOutput()
-		require.NoError(t, err)
+		if err := s.RunOutput(); err != nil {
+			t.Error(err)
+		}
 		wg.Done()
 	}()
 
-	serializer := serializers.NewInfluxSerializer()
+	serializer := &influx.Serializer{}
+	require.NoError(t, serializer.Init())
 
 	m := metric.New("thing",
 		map[string]string{

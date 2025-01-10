@@ -1,7 +1,13 @@
-# Application Insights Output Plugin
+# Azure Application Insights Output Plugin
 
-This plugin writes telegraf metrics to [Azure Application
-Insights](https://azure.microsoft.com/en-us/services/application-insights/).
+This plugin writes metrics to the [Azure Application Insights][insights]
+service.
+
+⭐ Telegraf v1.7.0
+🏷️ applications, cloud
+💻 all
+
+[insights]: https://azure.microsoft.com/en-us/services/application-insights/
 
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
@@ -28,6 +34,10 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
   ## Enable additional diagnostic logging.
   # enable_diagnostic_logging = false
+
+  ## NOTE: Due to the way TOML is parsed, tables must be at the END of the
+  ## plugin definition, otherwise additional config options are read as part of
+  ## the table
 
   ## Context Tag Sources add Application Insights context tags to a tag value.
   ##

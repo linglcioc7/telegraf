@@ -3,6 +3,17 @@
 The [NSQ][nsq] consumer plugin reads from NSQD and creates metrics using one
 of the supported [input data formats][].
 
+## Service Input <!-- @/docs/includes/service_input.md -->
+
+This plugin is a service input. Normal plugins gather metrics determined by the
+interval setting. Service plugins start a service to listens and waits for
+metrics or events to occur. Service plugins have two key differences from
+normal plugins:
+
+1. The global or plugin specific `interval` setting may not apply
+2. The CLI options of `--test`, `--test-wait`, and `--once` may not produce
+   output for this plugin
+
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
 In addition to the plugin-specific configuration settings, plugins support
@@ -17,9 +28,6 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 ```toml @sample.conf
 # Read metrics from NSQD topic(s)
 [[inputs.nsq_consumer]]
-  ## Server option still works but is deprecated, we just prepend it to the nsqd array.
-  # server = "localhost:4150"
-
   ## An array representing the NSQD TCP HTTP Endpoints
   nsqd = ["localhost:4150"]
 

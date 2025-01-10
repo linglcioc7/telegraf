@@ -145,9 +145,9 @@ func (a *AzureMonitor) Connect() error {
 	}
 
 	if resourceID == "" {
-		return fmt.Errorf("no resource ID configured or available via VM instance metadata")
+		return errors.New("no resource ID configured or available via VM instance metadata")
 	} else if region == "" {
-		return fmt.Errorf("no region configured or available via VM instance metadata")
+		return errors.New("no region configured or available via VM instance metadata")
 	}
 
 	if endpointURL == "" {
@@ -184,7 +184,7 @@ func (a *AzureMonitor) initHTTPClient() {
 }
 
 // vmMetadata retrieves metadata about the current Azure VM
-func vmInstanceMetadata(c *http.Client) (region string, resourceID string, err error) {
+func vmInstanceMetadata(c *http.Client) (region, resourceID string, err error) {
 	req, err := http.NewRequest("GET", vmInstanceMetadataURL, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("error creating request: %w", err)
@@ -281,7 +281,7 @@ func (a *AzureMonitor) Write(metrics []telegraf.Metric) error {
 	for _, m := range azmetrics {
 		// Azure Monitor accepts new batches of points in new-line delimited
 		// JSON, following RFC 4288 (see https://github.com/ndjson/ndjson-spec).
-		jsonBytes, err := json.Marshal(&m)
+		jsonBytes, err := json.Marshal(m)
 		if err != nil {
 			return err
 		}
@@ -346,20 +346,20 @@ func (a *AzureMonitor) send(body []byte) error {
 
 func hashIDWithTagKeysOnly(m telegraf.Metric) uint64 {
 	h := fnv.New64a()
-	h.Write([]byte(m.Name())) //nolint:revive // from hash.go: "It never returns an error"
-	h.Write([]byte("\n"))     //nolint:revive // from hash.go: "It never returns an error"
+	h.Write([]byte(m.Name()))
+	h.Write([]byte("\n"))
 	for _, tag := range m.TagList() {
 		if tag.Key == "" || tag.Value == "" {
 			continue
 		}
 
-		h.Write([]byte(tag.Key)) //nolint:revive // from hash.go: "It never returns an error"
-		h.Write([]byte("\n"))    //nolint:revive // from hash.go: "It never returns an error"
+		h.Write([]byte(tag.Key))
+		h.Write([]byte("\n"))
 	}
 	b := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(b, uint64(m.Time().UnixNano()))
-	h.Write(b[:n])        //nolint:revive // from hash.go: "It never returns an error"
-	h.Write([]byte("\n")) //nolint:revive // from hash.go: "It never returns an error"
+	h.Write(b[:n])
+	h.Write([]byte("\n"))
 	return h.Sum64()
 }
 
@@ -380,19 +380,19 @@ func translate(m telegraf.Metric, prefix string) (*azureMonitorMetric, error) {
 		dimensionValues = append(dimensionValues, tag.Value)
 	}
 
-	min, err := getFloatField(m, "min")
+	vmin, err := getFloatField(m, "min")
 	if err != nil {
 		return nil, err
 	}
-	max, err := getFloatField(m, "max")
+	vmax, err := getFloatField(m, "max")
 	if err != nil {
 		return nil, err
 	}
-	sum, err := getFloatField(m, "sum")
+	vsum, err := getFloatField(m, "sum")
 	if err != nil {
 		return nil, err
 	}
-	count, err := getIntField(m, "count")
+	vcount, err := getIntField(m, "count")
 	if err != nil {
 		return nil, err
 	}
@@ -417,10 +417,10 @@ func translate(m telegraf.Metric, prefix string) (*azureMonitorMetric, error) {
 				Series: []*azureMonitorSeries{
 					{
 						DimensionValues: dimensionValues,
-						Min:             min,
-						Max:             max,
-						Sum:             sum,
-						Count:           count,
+						Min:             vmin,
+						Max:             vmax,
+						Sum:             vsum,
+						Count:           vcount,
 					},
 				},
 			},
@@ -553,10 +553,10 @@ func hashIDWithField(id uint64, fk string) uint64 {
 	h := fnv.New64a()
 	b := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(b, id)
-	h.Write(b[:n])        //nolint:revive // from hash.go: "It never returns an error"
-	h.Write([]byte("\n")) //nolint:revive // from hash.go: "It never returns an error"
-	h.Write([]byte(fk))   //nolint:revive // from hash.go: "It never returns an error"
-	h.Write([]byte("\n")) //nolint:revive // from hash.go: "It never returns an error"
+	h.Write(b[:n])
+	h.Write([]byte("\n"))
+	h.Write([]byte(fk))
+	h.Write([]byte("\n"))
 	return h.Sum64()
 }
 

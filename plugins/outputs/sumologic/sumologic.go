@@ -5,16 +5,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	_ "embed"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
-
-	"github.com/pkg/errors"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/models"
 	"github.com/influxdata/telegraf/plugins/outputs"
-	"github.com/influxdata/telegraf/plugins/serializers"
 	"github.com/influxdata/telegraf/plugins/serializers/carbon2"
 	"github.com/influxdata/telegraf/plugins/serializers/graphite"
 	"github.com/influxdata/telegraf/plugins/serializers/prometheus"
@@ -44,9 +44,9 @@ const (
 )
 
 type SumoLogic struct {
-	URL               string          `toml:"url"`
-	Timeout           config.Duration `toml:"timeout"`
-	MaxRequstBodySize config.Size     `toml:"max_request_body_size"`
+	URL                string          `toml:"url"`
+	Timeout            config.Duration `toml:"timeout"`
+	MaxRequestBodySize config.Size     `toml:"max_request_body_size"`
 
 	SourceName     string `toml:"source_name"`
 	SourceHost     string `toml:"source_host"`
@@ -56,9 +56,8 @@ type SumoLogic struct {
 	Log telegraf.Logger `toml:"-"`
 
 	client     *http.Client
-	serializer serializers.Serializer
+	serializer telegraf.Serializer
 
-	err     error
 	headers map[string]string
 }
 
@@ -66,31 +65,7 @@ func (*SumoLogic) SampleConfig() string {
 	return sampleConfig
 }
 
-func (s *SumoLogic) SetSerializer(serializer serializers.Serializer) {
-	if s.headers == nil {
-		s.headers = make(map[string]string)
-	}
-
-	switch sr := serializer.(type) {
-	case *carbon2.Serializer:
-		s.headers[contentTypeHeader] = carbon2ContentType
-
-		// In case Carbon2 is used and the metrics format was unset, default to
-		// include field in metric name.
-		if sr.IsMetricsFormatUnset() {
-			sr.SetMetricsFormat(carbon2.Carbon2FormatMetricIncludesField)
-		}
-
-	case *graphite.GraphiteSerializer:
-		s.headers[contentTypeHeader] = graphiteContentType
-
-	case *prometheus.Serializer:
-		s.headers[contentTypeHeader] = prometheusContentType
-
-	default:
-		s.err = errors.Errorf("unsupported serializer %T", serializer)
-	}
-
+func (s *SumoLogic) SetSerializer(serializer telegraf.Serializer) {
 	s.serializer = serializer
 }
 
@@ -104,8 +79,24 @@ func (s *SumoLogic) createClient() *http.Client {
 }
 
 func (s *SumoLogic) Connect() error {
-	if s.err != nil {
-		return errors.Wrap(s.err, "sumologic: incorrect configuration")
+	s.headers = make(map[string]string)
+
+	var serializer telegraf.Serializer
+	if unwrapped, ok := s.serializer.(*models.RunningSerializer); ok {
+		serializer = unwrapped.Serializer
+	} else {
+		serializer = s.serializer
+	}
+
+	switch serializer.(type) {
+	case *carbon2.Serializer:
+		s.headers[contentTypeHeader] = carbon2ContentType
+	case *graphite.GraphiteSerializer:
+		s.headers[contentTypeHeader] = graphiteContentType
+	case *prometheus.Serializer:
+		s.headers[contentTypeHeader] = prometheusContentType
+	default:
+		return fmt.Errorf("unsupported serializer %T", serializer)
 	}
 
 	if s.Timeout == 0 {
@@ -118,13 +109,10 @@ func (s *SumoLogic) Connect() error {
 }
 
 func (s *SumoLogic) Close() error {
-	return s.err
+	return nil
 }
 
 func (s *SumoLogic) Write(metrics []telegraf.Metric) error {
-	if s.err != nil {
-		return errors.Wrap(s.err, "sumologic: incorrect configuration")
-	}
 	if s.serializer == nil {
 		return errors.New("sumologic: serializer unset")
 	}
@@ -137,7 +125,7 @@ func (s *SumoLogic) Write(metrics []telegraf.Metric) error {
 		return err
 	}
 
-	if l := len(reqBody); l > int(s.MaxRequstBodySize) {
+	if l := len(reqBody); l > int(s.MaxRequestBodySize) {
 		chunks, err := s.splitIntoChunks(metrics)
 		if err != nil {
 			return err
@@ -169,7 +157,7 @@ func (s *SumoLogic) writeRequestChunk(reqBody []byte) error {
 		return err
 	}
 
-	if err = gz.Close(); err != nil {
+	if err := gz.Close(); err != nil {
 		return err
 	}
 
@@ -193,25 +181,22 @@ func (s *SumoLogic) writeRequestChunk(reqBody []byte) error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return errors.Wrapf(err, "sumologic: failed sending request to [%s]", s.URL)
+		return fmt.Errorf("sumologic: failed sending request to %q: %w", s.URL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.Errorf(
-			"sumologic: when writing to [%s] received status code: %d",
-			s.URL, resp.StatusCode,
-		)
+		return fmt.Errorf("sumologic: when writing to %q received status code: %d", s.URL, resp.StatusCode)
 	}
 
 	return nil
 }
 
 // splitIntoChunks splits metrics to be sent into chunks so that every request
-// is smaller than s.MaxRequstBodySize unless it was configured so small so that
+// is smaller than s.MaxRequestBodySize unless it was configured so small so that
 // even a single metric cannot fit.
 // In such a situation metrics will be sent one by one with a warning being logged
-// for every request sent even though they don't fit in s.MaxRequstBodySize bytes.
+// for every request sent even though they don't fit in s.MaxRequestBodySize bytes.
 func (s *SumoLogic) splitIntoChunks(metrics []telegraf.Metric) ([][]byte, error) {
 	var (
 		numMetrics = len(metrics)
@@ -229,7 +214,7 @@ func (s *SumoLogic) splitIntoChunks(metrics []telegraf.Metric) ([][]byte, error)
 			la := len(toAppend)
 			if la != 0 {
 				// We already have something to append ...
-				if la+len(chunkBody) > int(s.MaxRequstBodySize) {
+				if la+len(chunkBody) > int(s.MaxRequestBodySize) {
 					// ... and it's just the right size, without currently processed chunk.
 					break
 				}
@@ -243,10 +228,10 @@ func (s *SumoLogic) splitIntoChunks(metrics []telegraf.Metric) ([][]byte, error)
 			i++
 			toAppend = chunkBody
 
-			if len(chunkBody) > int(s.MaxRequstBodySize) {
+			if len(chunkBody) > int(s.MaxRequestBodySize) {
 				s.Log.Warnf(
 					"max_request_body_size set to %d which is too small even for a single metric (len: %d), sending without split",
-					s.MaxRequstBodySize, len(chunkBody),
+					s.MaxRequestBodySize, len(chunkBody),
 				)
 
 				// The serialized metric is too big, but we have no choice
@@ -277,9 +262,9 @@ func setHeaderIfSetInConfig(r *http.Request, h header, value string) {
 
 func Default() *SumoLogic {
 	return &SumoLogic{
-		Timeout:           config.Duration(defaultClientTimeout),
-		MaxRequstBodySize: defaultMaxRequestBodySize,
-		headers:           make(map[string]string),
+		Timeout:            config.Duration(defaultClientTimeout),
+		MaxRequestBodySize: defaultMaxRequestBodySize,
+		headers:            make(map[string]string),
 	}
 }
 

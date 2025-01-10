@@ -135,7 +135,7 @@ func (p *Parser) Parse(buf []byte) ([]telegraf.Metric, error) {
 		metrics = append(metrics, ms...)
 		fallthrough
 	case 1:
-		msg.Write(bytes.TrimSpace(parts[0])) //nolint:revive // from buffer.go: "err is always nil"
+		msg.Write(bytes.TrimSpace(parts[0]))
 	default:
 		return nil, errors.New("illegal output format")
 	}
@@ -145,9 +145,9 @@ func (p *Parser) Parse(buf []byte) ([]telegraf.Metric, error) {
 		if bytes.Contains(s.Bytes(), []byte{'|'}) {
 			parts := bytes.Split(s.Bytes(), []byte{'|'})
 			if longmsg.Len() != 0 {
-				longmsg.WriteByte('\n') //nolint:revive // from buffer.go: "err is always nil"
+				longmsg.WriteByte('\n')
 			}
-			longmsg.Write(bytes.TrimSpace(parts[0])) //nolint:revive // from buffer.go: "err is always nil"
+			longmsg.Write(bytes.TrimSpace(parts[0]))
 
 			ms, err := parsePerfData(string(parts[1]), ts)
 			if err != nil {
@@ -157,9 +157,9 @@ func (p *Parser) Parse(buf []byte) ([]telegraf.Metric, error) {
 			break
 		}
 		if longmsg.Len() != 0 {
-			longmsg.WriteByte('\n') //nolint:revive // from buffer.go: "err is always nil"
+			longmsg.WriteByte('\n')
 		}
-		longmsg.Write(bytes.TrimSpace(s.Bytes())) //nolint:revive // from buffer.go: "err is always nil"
+		longmsg.Write(bytes.TrimSpace(s.Bytes()))
 	}
 
 	// Parse extra performance data.
@@ -193,8 +193,8 @@ func parsePerfData(perfdatas string, timestamp time.Time) ([]telegraf.Metric, er
 	metrics := make([]telegraf.Metric, 0)
 
 	for _, unParsedPerf := range perfSplitRegExp.FindAllString(perfdatas, -1) {
-		trimedPerf := strings.TrimSpace(unParsedPerf)
-		perf := nagiosRegExp.FindStringSubmatch(trimedPerf)
+		trimmedPerf := strings.TrimSpace(unParsedPerf)
+		perf := nagiosRegExp.FindStringSubmatch(trimmedPerf)
 
 		// verify at least `'label'=value[UOM];` existed
 		if len(perf) < 3 {
@@ -278,30 +278,30 @@ const (
 var ErrBadThresholdFormat = errors.New("bad threshold format")
 
 // Handles all cases from https://nagios-plugins.org/doc/guidelines.html#THRESHOLDFORMAT
-func parseThreshold(threshold string) (min float64, max float64, err error) {
+func parseThreshold(threshold string) (vmin, vmax float64, err error) {
 	thresh := strings.Split(threshold, ":")
 	switch len(thresh) {
 	case 1:
-		max, err = strconv.ParseFloat(thresh[0], 64)
+		vmax, err = strconv.ParseFloat(thresh[0], 64)
 		if err != nil {
 			return 0, 0, ErrBadThresholdFormat
 		}
 
-		return 0, max, nil
+		return 0, vmax, nil
 	case 2:
 		if thresh[0] == "~" {
-			min = MinFloat64
+			vmin = MinFloat64
 		} else {
-			min, err = strconv.ParseFloat(thresh[0], 64)
+			vmin, err = strconv.ParseFloat(thresh[0], 64)
 			if err != nil {
-				min = 0
+				vmin = 0
 			}
 		}
 
 		if thresh[1] == "" {
-			max = MaxFloat64
+			vmax = MaxFloat64
 		} else {
-			max, err = strconv.ParseFloat(thresh[1], 64)
+			vmax, err = strconv.ParseFloat(thresh[1], 64)
 			if err != nil {
 				return 0, 0, ErrBadThresholdFormat
 			}
@@ -310,7 +310,7 @@ func parseThreshold(threshold string) (min float64, max float64, err error) {
 		return 0, 0, ErrBadThresholdFormat
 	}
 
-	return min, max, err
+	return vmin, vmax, err
 }
 
 func init() {
@@ -320,11 +320,4 @@ func init() {
 			return &Parser{metricName: defaultMetricName}
 		},
 	)
-}
-
-// InitFromConfig is a compatibility function to construct the parser the old way
-func (p *Parser) InitFromConfig(config *parsers.Config) error {
-	p.metricName = config.MetricName
-	p.DefaultTags = config.DefaultTags
-	return nil
 }

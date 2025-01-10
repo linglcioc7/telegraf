@@ -2,7 +2,6 @@
 package groundwork
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -12,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/gwos/tcg/sdk/clients"
-	"github.com/gwos/tcg/sdk/logper"
+	"github.com/gwos/tcg/sdk/log"
 	"github.com/gwos/tcg/sdk/transit"
 	"github.com/hashicorp/go-uuid"
 
@@ -77,45 +76,34 @@ func (g *Groundwork) Init() error {
 	if err != nil {
 		return fmt.Errorf("getting username failed: %w", err)
 	}
-	defer config.ReleaseSecret(username)
 	password, err := g.Password.Get()
 	if err != nil {
+		username.Destroy()
 		return fmt.Errorf("getting password failed: %w", err)
 	}
-	defer config.ReleaseSecret(password)
 	g.client = clients.GWClient{
 		AppName: "telegraf",
 		AppType: g.DefaultAppType,
 		GWConnection: &clients.GWConnection{
 			HostName:           g.Server,
-			UserName:           string(username),
-			Password:           string(password),
+			UserName:           username.String(),
+			Password:           password.String(),
 			IsDynamicInventory: true,
 		},
 	}
+	username.Destroy()
+	password.Destroy()
 
-	logper.SetLogger(
-		func(fields interface{}, format string, a ...interface{}) {
-			g.Log.Error(adaptLog(fields, format, a...))
-		},
-		func(fields interface{}, format string, a ...interface{}) {
-			g.Log.Warn(adaptLog(fields, format, a...))
-		},
-		func(fields interface{}, format string, a ...interface{}) {
-			g.Log.Info(adaptLog(fields, format, a...))
-		},
-		func(fields interface{}, format string, a ...interface{}) {
-			g.Log.Debug(adaptLog(fields, format, a...))
-		},
-		func() bool { return telegraf.Debug },
-	)
+	/* adapt SDK logger */
+	log.Logger = newLogger(g.Log).WithGroup("tcg.sdk")
+
 	return nil
 }
 
 func (g *Groundwork) Connect() error {
 	err := g.client.Connect()
 	if err != nil {
-		return fmt.Errorf("could not log in: %w", err)
+		return fmt.Errorf("could not login: %w", err)
 	}
 	return nil
 }
@@ -123,7 +111,7 @@ func (g *Groundwork) Connect() error {
 func (g *Groundwork) Close() error {
 	err := g.client.Disconnect()
 	if err != nil {
-		return fmt.Errorf("could not log out: %w", err)
+		return fmt.Errorf("could not logout: %w", err)
 	}
 	return nil
 }
@@ -345,15 +333,15 @@ func (g *Groundwork) parseMetric(metric telegraf.Metric) (metricMeta, *transit.M
 	}
 
 	if m, ok := metric.GetTag("message"); ok {
-		serviceObject.LastPluginOutput = m
+		serviceObject.LastPluginOutput = strings.ToValidUTF8(m, "?")
 	} else if m, ok := metric.GetField("message"); ok {
 		switch m := m.(type) {
 		case string:
-			serviceObject.LastPluginOutput = m
+			serviceObject.LastPluginOutput = strings.ToValidUTF8(m, "?")
 		case []byte:
-			serviceObject.LastPluginOutput = string(m)
+			serviceObject.LastPluginOutput = strings.ToValidUTF8(string(m), "?")
 		default:
-			serviceObject.LastPluginOutput = fmt.Sprintf("%v", m)
+			serviceObject.LastPluginOutput = strings.ToValidUTF8(fmt.Sprintf("%v", m), "?")
 		}
 	}
 
@@ -393,47 +381,4 @@ func validStatus(status string) bool {
 		return true
 	}
 	return false
-}
-
-func adaptLog(fields interface{}, format string, a ...interface{}) string {
-	buf := &bytes.Buffer{}
-	if format != "" {
-		fmt.Fprintf(buf, format, a...)
-	}
-	fmtField := func(k string, v interface{}) {
-		format := " %s:"
-		if len(k) == 0 {
-			format = " "
-		}
-		if _, ok := v.(int); ok {
-			format += "%d"
-		} else {
-			format += "%q"
-		}
-		fmt.Fprintf(buf, format, k, v)
-	}
-	if ff, ok := fields.(interface {
-		LogFields() (map[string]interface{}, map[string][]byte)
-	}); ok {
-		m1, m2 := ff.LogFields()
-		for k, v := range m1 {
-			fmtField(k, v)
-		}
-		for k, v := range m2 {
-			fmtField(k, v)
-		}
-	} else if ff, ok := fields.(map[string]interface{}); ok {
-		for k, v := range ff {
-			fmtField(k, v)
-		}
-	} else if ff, ok := fields.([]interface{}); ok {
-		for _, v := range ff {
-			fmtField("", v)
-		}
-	}
-	out := buf.Bytes()
-	if len(out) > 1 {
-		out = append(bytes.ToUpper(out[0:1]), out[1:]...)
-	}
-	return string(out)
 }

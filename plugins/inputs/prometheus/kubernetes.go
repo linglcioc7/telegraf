@@ -8,10 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/models"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -60,7 +64,7 @@ func (p *Prometheus) startK8s(ctx context.Context) error {
 			return fmt.Errorf("failed to get current user: %w", err)
 		}
 
-		kubeconfig := filepath.Join(u.HomeDir, ".kube/config")
+		kubeconfig := filepath.Join(u.HomeDir, ".kube", "config")
 
 		config, err = loadConfig(kubeconfig)
 		if err != nil {
@@ -73,6 +77,13 @@ func (p *Prometheus) startK8s(ctx context.Context) error {
 		}
 	}
 
+	if !p.isNodeScrapeScope {
+		err = p.watchPod(ctx, client)
+		if err != nil {
+			p.Log.Warnf("Error while attempting to watch pod: %s", err.Error())
+		}
+	}
+
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -82,12 +93,21 @@ func (p *Prometheus) startK8s(ctx context.Context) error {
 				return
 			case <-time.After(time.Second):
 				if p.isNodeScrapeScope {
-					err = p.cAdvisor(ctx, config.BearerToken)
+					bearerToken := config.BearerToken
+					if config.BearerTokenFile != "" {
+						bearerTokenBytes, err := os.ReadFile(config.BearerTokenFile)
+						if err != nil {
+							p.Log.Errorf("Error reading bearer token file hence falling back to BearerToken: %s", err.Error())
+						} else {
+							bearerToken = string(bearerTokenBytes)
+						}
+					}
+					err = p.cAdvisor(ctx, bearerToken)
 					if err != nil {
 						p.Log.Errorf("Unable to monitor pods with node scrape scope: %s", err.Error())
 					}
 				} else {
-					p.watchPod(ctx, client)
+					<-ctx.Done()
 				}
 			}
 		}
@@ -104,25 +124,25 @@ func shouldScrapePod(pod *corev1.Pod, p *Prometheus) bool {
 
 	var shouldScrape bool
 	switch p.MonitorKubernetesPodsMethod {
-	case MonitorMethodAnnotations: // must have 'true' annotation to be scraped
+	case monitorMethodAnnotations: // must have 'true' annotation to be scraped
 		shouldScrape = pod.Annotations != nil && pod.Annotations["prometheus.io/scrape"] == "true"
-	case MonitorMethodSettings: // will be scraped regardless of annotation
+	case monitorMethodSettings: // will be scraped regardless of annotation
 		shouldScrape = true
-	case MonitorMethodSettingsAndAnnotations: // will be scraped unless opts out with 'false' annotation
+	case monitorMethodSettingsAndAnnotations: // will be scraped unless opts out with 'false' annotation
 		shouldScrape = pod.Annotations == nil || pod.Annotations["prometheus.io/scrape"] != "false"
 	}
 
 	return isCandidate && shouldScrape
 }
 
-// Share informer across all instances of this plugin
-var informerfactory informers.SharedInformerFactory
+// Share informer per namespace across all instances of this plugin
+var informerfactory map[string]informers.SharedInformerFactory
 
 // An edge case exists if a pod goes offline at the same time a new pod is created
 // (without the scrape annotations). K8s may re-assign the old pod ip to the non-scrape
 // pod, causing errors in the logs. This is only true if the pod going offline is not
 // directed to do so by K8s.
-func (p *Prometheus) watchPod(ctx context.Context, clientset *kubernetes.Clientset) {
+func (p *Prometheus) watchPod(ctx context.Context, clientset *kubernetes.Clientset) error {
 	var resyncinterval time.Duration
 
 	if p.CacheRefreshInterval != 0 {
@@ -132,11 +152,26 @@ func (p *Prometheus) watchPod(ctx context.Context, clientset *kubernetes.Clients
 	}
 
 	if informerfactory == nil {
-		informerfactory = informers.NewSharedInformerFactory(clientset, resyncinterval)
+		informerfactory = make(map[string]informers.SharedInformerFactory)
 	}
 
-	podinformer := informerfactory.Core().V1().Pods()
-	podinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	var f informers.SharedInformerFactory
+	var ok bool
+	if f, ok = informerfactory[p.PodNamespace]; !ok {
+		var informerOptions []informers.SharedInformerOption
+		if p.PodNamespace != "" {
+			informerOptions = append(informerOptions, informers.WithNamespace(p.PodNamespace))
+		}
+		f = informers.NewSharedInformerFactoryWithOptions(clientset, resyncinterval, informerOptions...)
+		informerfactory[p.PodNamespace] = f
+	}
+
+	if p.nsAnnotationPass != nil || p.nsAnnotationDrop != nil {
+		p.nsStore = f.Core().V1().Namespaces().Informer().GetStore()
+	}
+
+	podinformer := f.Core().V1().Pods()
+	_, err := podinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(newObj interface{}) {
 			newPod, ok := newObj.(*corev1.Pod)
 			if !ok {
@@ -159,7 +194,7 @@ func (p *Prometheus) watchPod(ctx context.Context, clientset *kubernetes.Clients
 			if err != nil {
 				p.Log.Errorf("getting key from cache %s", err.Error())
 			}
-			podID := PodID(key)
+			podID := podID(key)
 			if shouldScrapePod(newPod, p) {
 				// When Informers re-Lists, pod might already be registered,
 				// do nothing if it is, register otherwise
@@ -174,15 +209,14 @@ func (p *Prometheus) watchPod(ctx context.Context, clientset *kubernetes.Clients
 		DeleteFunc: func(oldObj interface{}) {
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(oldObj)
 			if err == nil {
-				unregisterPod(PodID(key), p)
+				unregisterPod(podID(key), p)
 			}
 		},
 	})
 
-	informerfactory.Start(ctx.Done())
-	informerfactory.WaitForCacheSync(wait.NeverStop)
-
-	<-ctx.Done()
+	f.Start(ctx.Done())
+	f.WaitForCacheSync(wait.NeverStop)
+	return err
 }
 
 func (p *Prometheus) cAdvisor(ctx context.Context, bearerToken string) error {
@@ -246,7 +280,7 @@ func updateCadvisorPodList(p *Prometheus, req *http.Request) error {
 
 	// Updating pod list to be latest cadvisor response
 	p.lock.Lock()
-	p.kubernetesPods = make(map[PodID]URLAndAddress)
+	p.kubernetesPods = make(map[podID]urlAndAddress)
 
 	// Register pod only if it has an annotation to scrape, if it is ready,
 	// and if namespace and selectors are specified and match
@@ -301,27 +335,59 @@ func podHasMatchingFieldSelector(pod *corev1.Pod, fieldSelector fields.Selector)
 	return fieldSelector.Matches(fieldsSet)
 }
 
+// Get corev1.Namespace object by name
+func getNamespaceObject(name string, p *Prometheus) *corev1.Namespace {
+	nsObj, exists, err := p.nsStore.GetByKey(name)
+	if err != nil {
+		p.Log.Errorf("Err fetching namespace '%s': %v", name, err)
+		return nil
+	} else if !exists {
+		return nil // can't happen
+	}
+	ns, ok := nsObj.(*corev1.Namespace)
+	if !ok {
+		p.Log.Errorf("[BUG] received unexpected object: %v", nsObj)
+		return nil
+	}
+	return ns
+}
+
+func namespaceAnnotationMatch(nsName string, p *Prometheus) bool {
+	// In case of no filtering or any issues with acquiring namespace information
+	// just let it pass trough...
+	if (p.nsAnnotationPass == nil && p.nsAnnotationDrop == nil) || p.nsStore == nil {
+		return true
+	}
+	ns := getNamespaceObject(nsName, p)
+	if ns == nil {
+		return true
+	}
+
+	tags := make([]*telegraf.Tag, 0, len(ns.Annotations))
+	for k, v := range ns.Annotations {
+		tags = append(tags, &telegraf.Tag{Key: k, Value: v})
+	}
+	return models.ShouldTagsPass(p.nsAnnotationPass, p.nsAnnotationDrop, tags)
+}
+
 /*
  * If a namespace is specified and the pod doesn't have that namespace, return false
  * Else return true
  */
 func podHasMatchingNamespace(pod *corev1.Pod, p *Prometheus) bool {
-	return !(p.PodNamespace != "" && pod.Namespace != p.PodNamespace)
+	return p.PodNamespace == "" || pod.Namespace == p.PodNamespace
 }
 
 func podReady(pod *corev1.Pod) bool {
 	for _, cond := range pod.Status.Conditions {
 		if cond.Type == corev1.PodReady {
-			return true
+			return pod.Status.Phase == corev1.PodRunning
 		}
 	}
 	return false
 }
 
 func registerPod(pod *corev1.Pod, p *Prometheus) {
-	if p.kubernetesPods == nil {
-		p.kubernetesPods = map[PodID]URLAndAddress{}
-	}
 	targetURL, err := getScrapeURL(pod, p)
 	if err != nil {
 		p.Log.Errorf("could not parse URL: %s", err)
@@ -331,10 +397,13 @@ func registerPod(pod *corev1.Pod, p *Prometheus) {
 	}
 
 	p.Log.Debugf("will scrape metrics from %q", targetURL.String())
-	// add annotation as metrics tags
-	tags := pod.Annotations
-	if tags == nil {
-		tags = map[string]string{}
+	tags := make(map[string]string, len(pod.Annotations)+len(pod.Labels)+2)
+
+	// add annotation as metrics tags, subject to include/exclude filters
+	for k, v := range pod.Annotations {
+		if models.ShouldPassFilters(p.podAnnotationIncludeFilter, p.podAnnotationExcludeFilter, k) {
+			tags[k] = v
+		}
 	}
 
 	tags["pod_name"] = pod.Name
@@ -344,11 +413,13 @@ func registerPod(pod *corev1.Pod, p *Prometheus) {
 	}
 	tags[podNamespace] = pod.Namespace
 
-	// add labels as metrics tags
+	// add labels as metrics tags, subject to include/exclude filters
 	for k, v := range pod.Labels {
-		tags[k] = v
+		if models.ShouldPassFilters(p.podLabelIncludeFilter, p.podLabelExcludeFilter, k) {
+			tags[k] = v
+		}
 	}
-	podURL := p.AddressToURL(targetURL, targetURL.Hostname())
+	podURL := addressToURL(targetURL, targetURL.Hostname())
 
 	// Locks earlier if using cAdvisor calls - makes a new list each time
 	// rather than updating and removing from the same list
@@ -356,11 +427,12 @@ func registerPod(pod *corev1.Pod, p *Prometheus) {
 		p.lock.Lock()
 		defer p.lock.Unlock()
 	}
-	p.kubernetesPods[PodID(pod.GetNamespace()+"/"+pod.GetName())] = URLAndAddress{
-		URL:         podURL,
-		Address:     targetURL.Hostname(),
-		OriginalURL: targetURL,
-		Tags:        tags,
+	p.kubernetesPods[podID(pod.GetNamespace()+"/"+pod.GetName())] = urlAndAddress{
+		url:         podURL,
+		address:     targetURL.Hostname(),
+		originalURL: targetURL,
+		tags:        tags,
+		namespace:   pod.GetNamespace(),
 	}
 }
 
@@ -374,15 +446,15 @@ func getScrapeURL(pod *corev1.Pod, p *Prometheus) (*url.URL, error) {
 
 	var scheme, pathAndQuery, port string
 
-	if p.MonitorKubernetesPodsMethod == MonitorMethodSettings ||
-		p.MonitorKubernetesPodsMethod == MonitorMethodSettingsAndAnnotations {
+	if p.MonitorKubernetesPodsMethod == monitorMethodSettings ||
+		p.MonitorKubernetesPodsMethod == monitorMethodSettingsAndAnnotations {
 		scheme = p.MonitorKubernetesPodsScheme
 		pathAndQuery = p.MonitorKubernetesPodsPath
 		port = strconv.Itoa(p.MonitorKubernetesPodsPort)
 	}
 
-	if p.MonitorKubernetesPodsMethod == MonitorMethodAnnotations ||
-		p.MonitorKubernetesPodsMethod == MonitorMethodSettingsAndAnnotations {
+	if p.MonitorKubernetesPodsMethod == monitorMethodAnnotations ||
+		p.MonitorKubernetesPodsMethod == monitorMethodSettingsAndAnnotations {
 		if ann := pod.Annotations["prometheus.io/scheme"]; ann != "" {
 			scheme = ann
 		}
@@ -417,12 +489,12 @@ func getScrapeURL(pod *corev1.Pod, p *Prometheus) (*url.URL, error) {
 	return base, nil
 }
 
-func unregisterPod(podID PodID, p *Prometheus) {
+func unregisterPod(podID podID, p *Prometheus) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 	if v, ok := p.kubernetesPods[podID]; ok {
 		p.Log.Debugf("registered a delete request for %s", podID)
 		delete(p.kubernetesPods, podID)
-		p.Log.Debugf("will stop scraping for %q", v.URL.String())
+		p.Log.Debugf("will stop scraping for %q", v.url.String())
 	}
 }

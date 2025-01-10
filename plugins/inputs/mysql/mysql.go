@@ -6,6 +6,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,70 +20,80 @@ import (
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	v1 "github.com/influxdata/telegraf/plugins/inputs/mysql/v1"
-	v2 "github.com/influxdata/telegraf/plugins/inputs/mysql/v2"
+	"github.com/influxdata/telegraf/plugins/inputs/mysql/v1"
+	"github.com/influxdata/telegraf/plugins/inputs/mysql/v2"
 )
 
 //go:embed sample.conf
 var sampleConfig string
 
-type Mysql struct {
-	Servers                             []config.Secret `toml:"servers"`
-	PerfEventsStatementsDigestTextLimit int64           `toml:"perf_events_statements_digest_text_limit"`
-	PerfEventsStatementsLimit           int64           `toml:"perf_events_statements_limit"`
-	PerfEventsStatementsTimeLimit       int64           `toml:"perf_events_statements_time_limit"`
-	TableSchemaDatabases                []string        `toml:"table_schema_databases"`
-	GatherProcessList                   bool            `toml:"gather_process_list"`
-	GatherUserStatistics                bool            `toml:"gather_user_statistics"`
-	GatherInfoSchemaAutoInc             bool            `toml:"gather_info_schema_auto_inc"`
-	GatherInnoDBMetrics                 bool            `toml:"gather_innodb_metrics"`
-	GatherSlaveStatus                   bool            `toml:"gather_slave_status"`
-	GatherAllSlaveChannels              bool            `toml:"gather_all_slave_channels"`
-	MariadbDialect                      bool            `toml:"mariadb_dialect"`
-	GatherBinaryLogs                    bool            `toml:"gather_binary_logs"`
-	GatherTableIOWaits                  bool            `toml:"gather_table_io_waits"`
-	GatherTableLockWaits                bool            `toml:"gather_table_lock_waits"`
-	GatherIndexIOWaits                  bool            `toml:"gather_index_io_waits"`
-	GatherEventWaits                    bool            `toml:"gather_event_waits"`
-	GatherTableSchema                   bool            `toml:"gather_table_schema"`
-	GatherFileEventsStats               bool            `toml:"gather_file_events_stats"`
-	GatherPerfEventsStatements          bool            `toml:"gather_perf_events_statements"`
-	GatherGlobalVars                    bool            `toml:"gather_global_variables"`
-	GatherPerfSummaryPerAccountPerEvent bool            `toml:"gather_perf_sum_per_acc_per_event"`
-	PerfSummaryEvents                   []string        `toml:"perf_summary_events"`
-	IntervalSlow                        config.Duration `toml:"interval_slow"`
-	MetricVersion                       int             `toml:"metric_version"`
-
-	Log telegraf.Logger `toml:"-"`
-	tls.ClientConfig
-	lastT          time.Time
-	getStatusQuery string
-}
+var tlsRe = regexp.MustCompile(`([\?&])(?:tls=custom)($|&)`)
 
 const (
 	defaultPerfEventsStatementsDigestTextLimit = 120
 	defaultPerfEventsStatementsLimit           = 250
 	defaultPerfEventsStatementsTimeLimit       = 86400
 	defaultGatherGlobalVars                    = true
+	localhost                                  = ""
 )
 
-const localhost = ""
+type Mysql struct {
+	Servers                             []*config.Secret `toml:"servers"`
+	PerfEventsStatementsDigestTextLimit int64            `toml:"perf_events_statements_digest_text_limit"`
+	PerfEventsStatementsLimit           int64            `toml:"perf_events_statements_limit"`
+	PerfEventsStatementsTimeLimit       int64            `toml:"perf_events_statements_time_limit"`
+	TableSchemaDatabases                []string         `toml:"table_schema_databases"`
+	GatherProcessList                   bool             `toml:"gather_process_list"`
+	GatherUserStatistics                bool             `toml:"gather_user_statistics"`
+	GatherInfoSchemaAutoInc             bool             `toml:"gather_info_schema_auto_inc"`
+	GatherInnoDBMetrics                 bool             `toml:"gather_innodb_metrics"`
+	GatherSlaveStatus                   bool             `toml:"gather_slave_status"`
+	GatherReplicaStatus                 bool             `toml:"gather_replica_status"`
+	GatherAllSlaveChannels              bool             `toml:"gather_all_slave_channels"`
+	MariadbDialect                      bool             `toml:"mariadb_dialect"`
+	GatherBinaryLogs                    bool             `toml:"gather_binary_logs"`
+	GatherTableIOWaits                  bool             `toml:"gather_table_io_waits"`
+	GatherTableLockWaits                bool             `toml:"gather_table_lock_waits"`
+	GatherIndexIOWaits                  bool             `toml:"gather_index_io_waits"`
+	GatherEventWaits                    bool             `toml:"gather_event_waits"`
+	GatherTableSchema                   bool             `toml:"gather_table_schema"`
+	GatherFileEventsStats               bool             `toml:"gather_file_events_stats"`
+	GatherPerfEventsStatements          bool             `toml:"gather_perf_events_statements"`
+	GatherGlobalVars                    bool             `toml:"gather_global_variables"`
+	GatherPerfSummaryPerAccountPerEvent bool             `toml:"gather_perf_sum_per_acc_per_event"`
+	PerfSummaryEvents                   []string         `toml:"perf_summary_events"`
+	IntervalSlow                        config.Duration  `toml:"interval_slow"`
+	MetricVersion                       int              `toml:"metric_version"`
+	Log                                 telegraf.Logger  `toml:"-"`
+	tls.ClientConfig
+
+	lastT               time.Time
+	getStatusQuery      string
+	loggedConvertFields map[string]bool
+}
 
 func (*Mysql) SampleConfig() string {
 	return sampleConfig
 }
 
 func (m *Mysql) Init() error {
-	if m.MariadbDialect {
+	switch {
+	case m.MariadbDialect && m.GatherReplicaStatus:
+		m.getStatusQuery = replicaStatusQueryMariadb
+	case m.MariadbDialect:
 		m.getStatusQuery = slaveStatusQueryMariadb
-	} else {
+	case m.GatherReplicaStatus:
+		m.getStatusQuery = replicaStatusQuery
+	default:
 		m.getStatusQuery = slaveStatusQuery
 	}
-
 	// Default to localhost if nothing specified.
 	if len(m.Servers) == 0 {
-		m.Servers = append(m.Servers, config.NewSecret([]byte(localhost)))
+		s := config.NewSecret([]byte(localhost))
+		m.Servers = append(m.Servers, &s)
 	}
+
+	m.loggedConvertFields = make(map[string]bool)
 
 	// Register the TLS configuration. Due to the registry being a global
 	// one for the mysql package, we need to define unique IDs to avoid
@@ -104,12 +116,18 @@ func (m *Mysql) Init() error {
 
 	// Adapt the DSN string
 	for i, server := range m.Servers {
-		s, err := server.Get()
+		dsnSecret, err := server.Get()
 		if err != nil {
-			return fmt.Errorf("getting server %d failed", i)
+			return fmt.Errorf("getting server %d failed: %w", i, err)
 		}
-		dsn := string(s)
-		config.ReleaseSecret(s)
+		dsn := dsnSecret.String()
+		dsnSecret.Destroy()
+
+		// Reference the custom TLS config of _THIS_ plugin instance
+		if tlsRe.MatchString(dsn) {
+			dsn = tlsRe.ReplaceAllString(dsn, "${1}tls="+tlsid+"${2}")
+		}
+
 		conf, err := mysql.ParseDSN(dsn)
 		if err != nil {
 			return fmt.Errorf("parsing %q failed: %w", dsn, err)
@@ -120,13 +138,11 @@ func (m *Mysql) Init() error {
 			conf.Timeout = time.Second * 5
 		}
 
-		// Reference the custom TLS config of _THIS_ plugin instance
-		if conf.TLSConfig == "custom" {
-			conf.TLSConfig = tlsid
+		if err := server.Set([]byte(conf.FormatDSN())); err != nil {
+			return fmt.Errorf("replacing server %q failed: %w", dsn, err)
 		}
 
-		server.Destroy()
-		m.Servers[i] = config.NewSecret([]byte(conf.FormatDSN()))
+		m.Servers[i] = server
 	}
 
 	return nil
@@ -138,7 +154,7 @@ func (m *Mysql) Gather(acc telegraf.Accumulator) error {
 	// Loop through each server and collect metrics
 	for _, server := range m.Servers {
 		wg.Add(1)
-		go func(s config.Secret) {
+		go func(s *config.Secret) {
 			defer wg.Done()
 			acc.AddError(m.gatherServer(s, acc))
 		}(server)
@@ -238,7 +254,9 @@ const (
 	globalStatusQuery          = `SHOW GLOBAL STATUS`
 	globalVariablesQuery       = `SHOW GLOBAL VARIABLES`
 	slaveStatusQuery           = `SHOW SLAVE STATUS`
+	replicaStatusQuery         = `SHOW REPLICA STATUS`
 	slaveStatusQueryMariadb    = `SHOW ALL SLAVES STATUS`
+	replicaStatusQueryMariadb  = `SHOW ALL REPLICAS STATUS`
 	binaryLogsQuery            = `SHOW BINARY LOGS`
 	infoSchemaProcessListQuery = `
         SELECT COALESCE(command,''),COALESCE(state,''),count(*)
@@ -271,7 +289,7 @@ const (
         EXECUTE IMMEDIATE CONCAT("
             SELECT NAME, COUNT
             FROM information_schema.INNODB_METRICS
-            WHERE ", IF(version() REGEXP '10\.[1-4].*',"status='enabled'", "ENABLED=1"), "
+            WHERE ", IF(version() REGEXP '10\.[1-4]\\..*',"status='enabled'", "ENABLED=1"), "
         ");
 	`
 	perfTableIOWaitsQuery = `
@@ -411,13 +429,13 @@ const (
 	`
 )
 
-func (m *Mysql) gatherServer(server config.Secret, acc telegraf.Accumulator) error {
-	s, err := server.Get()
+func (m *Mysql) gatherServer(server *config.Secret, acc telegraf.Accumulator) error {
+	dsnSecret, err := server.Get()
 	if err != nil {
 		return err
 	}
-	dsn := string(s)
-	config.ReleaseSecret(s)
+	dsn := dsnSecret.String()
+	dsnSecret.Destroy()
 	servtag := getDSNTag(dsn)
 
 	db, err := sql.Open("mysql", dsn)
@@ -443,7 +461,7 @@ func (m *Mysql) gatherServer(server config.Secret, acc telegraf.Accumulator) err
 	}
 
 	if m.GatherBinaryLogs {
-		err = m.gatherBinaryLogs(db, servtag, acc)
+		err = gatherBinaryLogs(db, servtag, acc)
 		if err != nil {
 			return err
 		}
@@ -463,7 +481,7 @@ func (m *Mysql) gatherServer(server config.Secret, acc telegraf.Accumulator) err
 		}
 	}
 
-	if m.GatherSlaveStatus {
+	if m.GatherSlaveStatus || m.GatherReplicaStatus {
 		err = m.gatherSlaveStatuses(db, servtag, acc)
 		if err != nil {
 			return err
@@ -492,35 +510,35 @@ func (m *Mysql) gatherServer(server config.Secret, acc telegraf.Accumulator) err
 	}
 
 	if m.GatherTableIOWaits {
-		err = m.gatherPerfTableIOWaits(db, servtag, acc)
+		err = gatherPerfTableIOWaits(db, servtag, acc)
 		if err != nil {
 			return err
 		}
 	}
 
 	if m.GatherIndexIOWaits {
-		err = m.gatherPerfIndexIOWaits(db, servtag, acc)
+		err = gatherPerfIndexIOWaits(db, servtag, acc)
 		if err != nil {
 			return err
 		}
 	}
 
 	if m.GatherTableLockWaits {
-		err = m.gatherPerfTableLockWaits(db, servtag, acc)
+		err = gatherPerfTableLockWaits(db, servtag, acc)
 		if err != nil {
 			return err
 		}
 	}
 
 	if m.GatherEventWaits {
-		err = m.gatherPerfEventWaits(db, servtag, acc)
+		err = gatherPerfEventWaits(db, servtag, acc)
 		if err != nil {
 			return err
 		}
 	}
 
 	if m.GatherFileEventsStats {
-		err = m.gatherPerfFileEventsStatuses(db, servtag, acc)
+		err = gatherPerfFileEventsStatuses(db, servtag, acc)
 		if err != nil {
 			return err
 		}
@@ -638,7 +656,7 @@ func (m *Mysql) gatherSlaveStatuses(db *sql.DB, servtag string, acc telegraf.Acc
 			vals[i] = sql.RawBytes{}
 			valPtrs[i] = &vals[i]
 		}
-		if err = rows.Scan(valPtrs...); err != nil {
+		if err := rows.Scan(valPtrs...); err != nil {
 			return err
 		}
 
@@ -653,7 +671,7 @@ func (m *Mysql) gatherSlaveStatuses(db *sql.DB, servtag string, acc telegraf.Acc
 			colValue := vals[i]
 
 			if m.GatherAllSlaveChannels &&
-				(strings.ToLower(colName) == "channel_name" || strings.ToLower(colName) == "connection_name") {
+				(strings.EqualFold(colName, "channel_name") || strings.EqualFold(colName, "connection_name")) {
 				// Since the default channel name is empty, we need this block
 				channelName := "default"
 				if len(colValue) > 0 {
@@ -694,7 +712,7 @@ func (m *Mysql) gatherSlaveStatuses(db *sql.DB, servtag string, acc telegraf.Acc
 
 // gatherBinaryLogs can be used to collect size and count of all binary files
 // binlogs metric requires the MySQL server to turn it on in configuration
-func (m *Mysql) gatherBinaryLogs(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
+func gatherBinaryLogs(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
 	// run query
 	rows, err := db.Query(binaryLogsQuery)
 	if err != nil {
@@ -760,7 +778,7 @@ func (m *Mysql) gatherGlobalStatuses(db *sql.DB, servtag string, acc telegraf.Ac
 		var key string
 		var val sql.RawBytes
 
-		if err = rows.Scan(&key, &val); err != nil {
+		if err := rows.Scan(&key, &val); err != nil {
 			return err
 		}
 
@@ -769,7 +787,24 @@ func (m *Mysql) gatherGlobalStatuses(db *sql.DB, servtag string, acc telegraf.Ac
 			for _, mapped := range v1.Mappings {
 				if strings.HasPrefix(key, mapped.OnServer) {
 					// convert numeric values to integer
-					i, _ := strconv.Atoi(string(val))
+					var i int
+					v := string(val)
+					switch v {
+					case "ON", "true":
+						i = 1
+					case "OFF", "false":
+						i = 0
+					default:
+						if i, err = strconv.Atoi(v); err != nil {
+							// Make the value a <nil> value to prevent adding
+							// the field containing nonsense values.
+							i = 0
+							if !m.loggedConvertFields[key] {
+								m.Log.Warnf("Cannot convert value %q for key %q to integer outputting zero...", v, key)
+								m.loggedConvertFields[key] = true
+							}
+						}
+					}
 					fields[mapped.InExport+key[len(mapped.OnServer):]] = i
 					found = true
 				}
@@ -944,7 +979,7 @@ func (m *Mysql) gatherUserStatisticsStatuses(db *sql.DB, servtag string, acc tel
 		return err
 	}
 
-	read, err := getColSlice(len(cols))
+	read, err := getColSlice(rows)
 	if err != nil {
 		return err
 	}
@@ -956,7 +991,7 @@ func (m *Mysql) gatherUserStatisticsStatuses(db *sql.DB, servtag string, acc tel
 		}
 
 		tags := map[string]string{"server": servtag, "user": *read[0].(*string)}
-		fields := map[string]interface{}{}
+		fields := make(map[string]interface{}, len(cols))
 
 		for i := range cols {
 			if i == 0 {
@@ -992,7 +1027,13 @@ func columnsToLower(s []string, e error) ([]string, error) {
 }
 
 // getColSlice returns an in interface slice that can be used in the row.Scan().
-func getColSlice(l int) ([]interface{}, error) {
+func getColSlice(rows *sql.Rows) ([]interface{}, error) {
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, err
+	}
+	l := len(columnTypes)
+
 	// list of all possible column names
 	var (
 		user                     string
@@ -1108,38 +1149,33 @@ func getColSlice(l int) ([]interface{}, error) {
 			&emptyQueries,
 		}, nil
 	case 22: // percona
-		return []interface{}{
-			&user,
-			&totalConnections,
-			&concurrentConnections,
-			&connectedTime,
-			&busyTime,
-			&cpuTime,
-			&bytesReceived,
-			&bytesSent,
-			&binlogBytesWritten,
-			&rowsFetched,
-			&rowsUpdated,
-			&tableRowsRead,
-			&selectCommands,
-			&updateCommands,
-			&otherCommands,
-			&commitTransactions,
-			&rollbackTransactions,
-			&deniedConnections,
-			&lostConnections,
-			&accessDenied,
-			&emptyQueries,
-			&totalSslConnections,
-		}, nil
+		cols := make([]interface{}, 0, 22)
+		for i, ct := range columnTypes {
+			// The first column is the user and has to be a string
+			if i == 0 {
+				cols = append(cols, new(string))
+				continue
+			}
+
+			// Percona 8 has some special fields that are float instead of ints
+			// see: https://github.com/influxdata/telegraf/issues/7360
+			switch ct.ScanType().Kind() {
+			case reflect.Float32, reflect.Float64:
+				cols = append(cols, new(float64))
+			default:
+				// Keep old type for backward compatibility
+				cols = append(cols, new(int64))
+			}
+		}
+
+		return cols, nil
 	}
 
 	return nil, fmt.Errorf("not Supported - %d columns", l)
 }
 
-// gatherPerfTableIOWaits can be used to get total count and time
-// of I/O wait event for each table and process
-func (m *Mysql) gatherPerfTableIOWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
+// gatherPerfTableIOWaits can be used to get total count and time of I/O wait event for each table and process
+func gatherPerfTableIOWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
 	rows, err := db.Query(perfTableIOWaitsQuery)
 	if err != nil {
 		return err
@@ -1184,9 +1220,8 @@ func (m *Mysql) gatherPerfTableIOWaits(db *sql.DB, servtag string, acc telegraf.
 	return nil
 }
 
-// gatherPerfIndexIOWaits can be used to get total count and time
-// of I/O wait event for each index and process
-func (m *Mysql) gatherPerfIndexIOWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
+// gatherPerfIndexIOWaits can be used to get total count and time of I/O wait event for each index and process
+func gatherPerfIndexIOWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
 	rows, err := db.Query(perfIndexIOWaitsQuery)
 	if err != nil {
 		return err
@@ -1463,7 +1498,7 @@ func (m *Mysql) gatherPerfSummaryPerAccountPerEvent(db *sql.DB, servtag string, 
 // the total number and time for SQL and external lock wait events
 // for each table and operation
 // requires the MySQL server to be enabled to save this metric
-func (m *Mysql) gatherPerfTableLockWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
+func gatherPerfTableLockWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
 	// check if table exists,
 	// if performance_schema is not enabled, tables do not exist
 	// then there is no need to scan them
@@ -1590,7 +1625,7 @@ func (m *Mysql) gatherPerfTableLockWaits(db *sql.DB, servtag string, acc telegra
 }
 
 // gatherPerfEventWaits can be used to get total time and number of event waits
-func (m *Mysql) gatherPerfEventWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
+func gatherPerfEventWaits(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
 	rows, err := db.Query(perfEventWaitsQuery)
 	if err != nil {
 		return err
@@ -1621,7 +1656,7 @@ func (m *Mysql) gatherPerfEventWaits(db *sql.DB, servtag string, acc telegraf.Ac
 }
 
 // gatherPerfFileEvents can be used to get stats on file events
-func (m *Mysql) gatherPerfFileEventsStatuses(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
+func gatherPerfFileEventsStatuses(db *sql.DB, servtag string, acc telegraf.Accumulator) error {
 	rows, err := db.Query(perfFileEventsQuery)
 	if err != nil {
 		return err
@@ -1777,7 +1812,7 @@ func (m *Mysql) gatherTableSchema(db *sql.DB, servtag string, acc telegraf.Accum
 	return nil
 }
 
-func (m *Mysql) gatherSchemaForDB(db *sql.DB, database string, servtag string, acc telegraf.Accumulator) error {
+func (m *Mysql) gatherSchemaForDB(db *sql.DB, database, servtag string, acc telegraf.Accumulator) error {
 	rows, err := db.Query(fmt.Sprintf(tableSchemaQuery, database))
 	if err != nil {
 		return err

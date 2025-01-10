@@ -58,10 +58,7 @@ type openConfigTelemetryServer struct {
 	telemetry.UnimplementedOpenConfigTelemetryServer
 }
 
-func (s *openConfigTelemetryServer) TelemetrySubscribe(
-	req *telemetry.SubscriptionRequest,
-	stream telemetry.OpenConfigTelemetry_TelemetrySubscribeServer,
-) error {
+func (*openConfigTelemetryServer) TelemetrySubscribe(req *telemetry.SubscriptionRequest, stream telemetry.OpenConfigTelemetry_TelemetrySubscribeServer) error {
 	path := req.PathList[0].Path
 	switch path {
 	case "/sensor":
@@ -78,28 +75,28 @@ func (s *openConfigTelemetryServer) TelemetrySubscribe(
 	return nil
 }
 
-func (s *openConfigTelemetryServer) CancelTelemetrySubscription(
-	_ context.Context,
-	_ *telemetry.CancelSubscriptionRequest,
+func (*openConfigTelemetryServer) CancelTelemetrySubscription(
+	context.Context,
+	*telemetry.CancelSubscriptionRequest,
 ) (*telemetry.CancelSubscriptionReply, error) {
 	return nil, nil
 }
 
-func (s *openConfigTelemetryServer) GetTelemetrySubscriptions(
-	_ context.Context,
-	_ *telemetry.GetSubscriptionsRequest,
+func (*openConfigTelemetryServer) GetTelemetrySubscriptions(
+	context.Context,
+	*telemetry.GetSubscriptionsRequest,
 ) (*telemetry.GetSubscriptionsReply, error) {
 	return nil, nil
 }
 
-func (s *openConfigTelemetryServer) GetTelemetryOperationalState(
-	_ context.Context,
-	_ *telemetry.GetOperationalStateRequest,
+func (*openConfigTelemetryServer) GetTelemetryOperationalState(
+	context.Context,
+	*telemetry.GetOperationalStateRequest,
 ) (*telemetry.GetOperationalStateReply, error) {
 	return nil, nil
 }
 
-func (s *openConfigTelemetryServer) GetDataEncodings(_ context.Context, _ *telemetry.DataEncodingRequest) (*telemetry.DataEncodingReply, error) {
+func (*openConfigTelemetryServer) GetDataEncodings(context.Context, *telemetry.DataEncodingRequest) (*telemetry.DataEncodingReply, error) {
 	return nil, nil
 }
 
@@ -253,6 +250,11 @@ func TestMain(m *testing.M) {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
+	exitCode := 0
+	defer func() {
+		os.Exit(exitCode)
+	}()
+
 	cfg.Servers = []string{lis.Addr().String()}
 
 	var opts []grpc.ServerOption
@@ -262,5 +264,6 @@ func TestMain(m *testing.M) {
 		grpcServer.Serve(lis) //nolint:errcheck // ignore the returned error as the tests will fail anyway
 	}()
 	defer grpcServer.Stop()
-	os.Exit(m.Run())
+
+	exitCode = m.Run()
 }

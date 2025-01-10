@@ -35,10 +35,6 @@ func (*SlabStats) SampleConfig() string {
 	return sampleConfig
 }
 
-func (ss *SlabStats) Init() error {
-	return nil
-}
-
 func (ss *SlabStats) Gather(acc telegraf.Accumulator) error {
 	fields, err := ss.getSlabStats()
 	if err != nil {
@@ -50,8 +46,6 @@ func (ss *SlabStats) Gather(acc telegraf.Accumulator) error {
 }
 
 func (ss *SlabStats) getSlabStats() (map[string]interface{}, error) {
-	fields := map[string]interface{}{}
-
 	out, err := ss.runCmd("/bin/cat", []string{ss.statFile})
 	if err != nil {
 		return nil, err
@@ -64,6 +58,7 @@ func (ss *SlabStats) getSlabStats() (map[string]interface{}, error) {
 	scanner.Scan() // for "slabinfo - version: 2.1"
 	scanner.Scan() // for "# name <active_objs> <num_objs> <objsize> ..."
 
+	fields := make(map[string]interface{})
 	// Read data rows
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -104,14 +99,6 @@ func (ss *SlabStats) runCmd(cmd string, args []string) ([]byte, error) {
 	return out, nil
 }
 
-func getHostProc() string {
-	procPath := "/proc"
-	if os.Getenv("HOST_PROC") != "" {
-		procPath = os.Getenv("HOST_PROC")
-	}
-	return procPath
-}
-
 func normalizeName(name string) string {
 	return strings.ReplaceAll(strings.ToLower(name), "-", "_") + "_size"
 }
@@ -119,7 +106,7 @@ func normalizeName(name string) string {
 func init() {
 	inputs.Add("slab", func() telegraf.Input {
 		return &SlabStats{
-			statFile: path.Join(getHostProc(), "slabinfo"),
+			statFile: path.Join(internal.GetProcPath(), "slabinfo"),
 			useSudo:  true,
 		}
 	})

@@ -49,11 +49,7 @@ type supervisorInfo struct {
 //go:embed sample.conf
 var sampleConfig string
 
-func (s *Supervisor) Description() string {
-	return "Gather info about processes state, that running under supervisor using its XML-RPC API"
-}
-
-func (s *Supervisor) SampleConfig() string {
+func (*Supervisor) SampleConfig() string {
 	return sampleConfig
 }
 
@@ -127,11 +123,14 @@ func (s *Supervisor) parseInstanceData(status supervisorInfo) (map[string]string
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse server string: %w", err)
 	}
-	tags := map[string]string{}
-	tags["id"] = status.Ident
-	tags["source"] = splittedURL[0]
-	tags["port"] = splittedURL[1]
-	fields := map[string]interface{}{"state": status.StateCode}
+	tags := map[string]string{
+		"id":     status.Ident,
+		"source": splittedURL[0],
+		"port":   splittedURL[1],
+	}
+	fields := map[string]interface{}{
+		"state": status.StateCode,
+	}
 	return tags, fields, nil
 }
 
@@ -144,7 +143,7 @@ func (s *Supervisor) Init() error {
 	// Initializing XML-RPC client
 	s.rpcClient, err = xmlrpc.NewClient(s.Server, nil)
 	if err != nil {
-		return fmt.Errorf("XML-RPC client initialization failed: %w", err)
+		return fmt.Errorf("failed to initialize XML-RPC client: %w", err)
 	}
 	// Setting filter for additional metrics
 	s.fieldFilter, err = filter.NewIncludeExcludeFilter(s.MetricsInc, s.MetricsExc)

@@ -3,11 +3,14 @@ package snmp_trap
 
 import (
 	_ "embed"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gosnmp/gosnmp"
 
@@ -26,9 +29,21 @@ type translator interface {
 	lookup(oid string) (snmp.MibEntry, error)
 }
 
+type wrapLog struct {
+	telegraf.Logger
+}
+
+func (l wrapLog) Printf(format string, args ...interface{}) {
+	l.Debugf(format, args...)
+}
+
+func (l wrapLog) Print(args ...interface{}) {
+	l.Debug(args...)
+}
+
 type SnmpTrap struct {
 	ServiceAddress string          `toml:"service_address"`
-	Timeout        config.Duration `toml:"timeout" deprecated:"1.20.0;unused option"`
+	Timeout        config.Duration `toml:"timeout"`
 	Version        string          `toml:"version"`
 	Translator     string          `toml:"-"`
 	Path           []string        `toml:"path"`
@@ -60,7 +75,7 @@ func (*SnmpTrap) SampleConfig() string {
 	return sampleConfig
 }
 
-func (s *SnmpTrap) Gather(_ telegraf.Accumulator) error {
+func (*SnmpTrap) Gather(telegraf.Accumulator) error {
 	return nil
 }
 
@@ -91,7 +106,7 @@ func (s *SnmpTrap) Init() error {
 	case "netsnmp":
 		s.transl = newNetsnmpTranslator(s.Timeout)
 	default:
-		return fmt.Errorf("invalid translator value")
+		return errors.New("invalid translator value")
 	}
 
 	if err != nil {
@@ -104,7 +119,12 @@ func (s *SnmpTrap) Start(acc telegraf.Accumulator) error {
 	s.acc = acc
 	s.listener = gosnmp.NewTrapListener()
 	s.listener.OnNewTrap = makeTrapHandler(s)
-	s.listener.Params = gosnmp.Default
+
+	// gosnmp.Default is a pointer, using this more than once
+	// has side effects
+	defaults := *gosnmp.Default
+	s.listener.Params = &defaults
+	s.listener.Params.Logger = gosnmp.NewLogger(wrapLog{s.Log})
 
 	switch s.Version {
 	case "3":
@@ -137,14 +157,14 @@ func (s *SnmpTrap) Start(acc telegraf.Accumulator) error {
 			authenticationProtocol = gosnmp.MD5
 		case "sha":
 			authenticationProtocol = gosnmp.SHA
-		//case "sha224":
-		//	authenticationProtocol = gosnmp.SHA224
-		//case "sha256":
-		//	authenticationProtocol = gosnmp.SHA256
-		//case "sha384":
-		//	authenticationProtocol = gosnmp.SHA384
-		//case "sha512":
-		//	authenticationProtocol = gosnmp.SHA512
+		case "sha224":
+			authenticationProtocol = gosnmp.SHA224
+		case "sha256":
+			authenticationProtocol = gosnmp.SHA256
+		case "sha384":
+			authenticationProtocol = gosnmp.SHA384
+		case "sha512":
+			authenticationProtocol = gosnmp.SHA512
 		case "":
 			authenticationProtocol = gosnmp.NoAuth
 		default:
@@ -171,28 +191,34 @@ func (s *SnmpTrap) Start(acc telegraf.Accumulator) error {
 			return fmt.Errorf("unknown privacy protocol %q", s.PrivProtocol)
 		}
 
-		secname, err := s.SecName.Get()
+		secnameSecret, err := s.SecName.Get()
 		if err != nil {
 			return fmt.Errorf("getting secname failed: %w", err)
 		}
-		privPasswd, err := s.PrivPassword.Get()
+		secname := secnameSecret.String()
+		secnameSecret.Destroy()
+
+		privPasswdSecret, err := s.PrivPassword.Get()
 		if err != nil {
 			return fmt.Errorf("getting secname failed: %w", err)
 		}
-		authPasswd, err := s.AuthPassword.Get()
+		privPasswd := privPasswdSecret.String()
+		privPasswdSecret.Destroy()
+
+		authPasswdSecret, err := s.AuthPassword.Get()
 		if err != nil {
 			return fmt.Errorf("getting secname failed: %w", err)
 		}
+		authPasswd := authPasswdSecret.String()
+		authPasswdSecret.Destroy()
+
 		s.listener.Params.SecurityParameters = &gosnmp.UsmSecurityParameters{
-			UserName:                 string(secname),
+			UserName:                 secname,
 			PrivacyProtocol:          privacyProtocol,
-			PrivacyPassphrase:        string(privPasswd),
-			AuthenticationPassphrase: string(authPasswd),
+			PrivacyPassphrase:        privPasswd,
+			AuthenticationPassphrase: authPasswd,
 			AuthenticationProtocol:   authenticationProtocol,
 		}
-		config.ReleaseSecret(secname)
-		config.ReleaseSecret(privPasswd)
-		config.ReleaseSecret(authPasswd)
 	}
 
 	// wrap the handler, used in unit tests
@@ -250,11 +276,11 @@ func setTrapOid(tags map[string]string, oid string, e snmp.MibEntry) {
 func makeTrapHandler(s *SnmpTrap) gosnmp.TrapHandlerFunc {
 	return func(packet *gosnmp.SnmpPacket, addr *net.UDPAddr) {
 		tm := s.timeFunc()
-		fields := map[string]interface{}{}
-		tags := map[string]string{}
-
-		tags["version"] = packet.Version.String()
-		tags["source"] = addr.IP.String()
+		fields := make(map[string]interface{}, len(packet.Variables)+1)
+		tags := map[string]string{
+			"version": packet.Version.String(),
+			"source":  addr.IP.String(),
+		}
 
 		if packet.Version == gosnmp.Version1 {
 			// Follow the procedure described in RFC 2576 3.1 to
@@ -319,6 +345,13 @@ func makeTrapHandler(s *SnmpTrap) gosnmp.TrapHandlerFunc {
 				if v.Name == ".1.3.6.1.6.3.1.1.4.1.0" {
 					setTrapOid(tags, val, e)
 					continue
+				}
+			case gosnmp.OctetString:
+				// OctetStrings may contain hex data that needs its own conversion
+				if !utf8.Valid(v.Value.([]byte)[:]) {
+					value = hex.EncodeToString(v.Value.([]byte))
+				} else {
+					value = v.Value
 				}
 			default:
 				value = v.Value

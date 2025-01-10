@@ -10,6 +10,7 @@ import (
 	"github.com/influxdata/line-protocol/v2/lineprotocol"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/plugins/parsers"
 )
@@ -20,7 +21,6 @@ const (
 
 var (
 	ErrNoMetric = errors.New("no metric in line")
-	ErrEOF      = errors.New("EOF")
 )
 
 type TimeFunc func() time.Time
@@ -103,7 +103,8 @@ func convertToParseError(input []byte, rawErr error) error {
 // Parser is an InfluxDB Line Protocol parser that implements the
 // parsers.Parser interface.
 type Parser struct {
-	DefaultTags map[string]string `toml:"-"`
+	InfluxTimestampPrecision config.Duration   `toml:"influx_timestamp_precision"`
+	DefaultTags              map[string]string `toml:"-"`
 	// If set to "series" a series machine will be initialized, defaults to regular machine
 	Type string `toml:"-"`
 
@@ -149,8 +150,10 @@ func (p *Parser) SetDefaultTags(tags map[string]string) {
 	p.DefaultTags = tags
 }
 
-func (p *Parser) SetTimePrecision(u time.Duration) {
+func (p *Parser) SetTimePrecision(u time.Duration) error {
 	switch u {
+	case 0:
+		p.precision = lineprotocol.Nanosecond
 	case time.Nanosecond:
 		p.precision = lineprotocol.Nanosecond
 	case time.Microsecond:
@@ -159,7 +162,11 @@ func (p *Parser) SetTimePrecision(u time.Duration) {
 		p.precision = lineprotocol.Millisecond
 	case time.Second:
 		p.precision = lineprotocol.Second
+	default:
+		return fmt.Errorf("invalid time precision: %d", u)
 	}
+
+	return nil
 }
 
 func (p *Parser) applyDefaultTags(metrics []telegraf.Metric) {
@@ -181,23 +188,19 @@ func (p *Parser) applyDefaultTagsSingle(m telegraf.Metric) {
 }
 
 func (p *Parser) Init() error {
+	if err := p.SetTimePrecision(time.Duration(p.InfluxTimestampPrecision)); err != nil {
+		return err
+	}
+
 	p.defaultTime = time.Now
-	p.precision = lineprotocol.Nanosecond
 	p.allowPartial = p.Type == "series"
 
 	return nil
 }
 
-// InitFromConfig is a compatibility function to construct the parser the old way
-func (p *Parser) InitFromConfig(config *parsers.Config) error {
-	p.DefaultTags = config.DefaultTags
-
-	return p.Init()
-}
-
 func init() {
 	parsers.Add("influx_upstream",
-		func(_ string) telegraf.Parser {
+		func(string) telegraf.Parser {
 			return &Parser{}
 		},
 	)
@@ -238,9 +241,9 @@ func (sp *StreamParser) SetTimePrecision(u time.Duration) error {
 	case time.Second:
 		sp.precision = lineprotocol.Second
 	case time.Minute:
-		return fmt.Errorf("time precision 'm' is not supported")
+		return errors.New("time precision 'm' is not supported")
 	case time.Hour:
-		return fmt.Errorf("time precision 'h' is not supported")
+		return errors.New("time precision 'h' is not supported")
 	}
 
 	return nil
@@ -255,12 +258,12 @@ func (sp *StreamParser) Next() (telegraf.Metric, error) {
 			return nil, err
 		}
 
-		return nil, ErrEOF
+		return nil, io.EOF
 	}
 
 	m, err := nextMetric(sp.decoder, sp.precision, sp.defaultTime, false)
 	if err != nil {
-		return nil, convertToParseError([]byte{}, err)
+		return nil, convertToParseError(nil, err)
 	}
 
 	return m, nil

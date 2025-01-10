@@ -30,7 +30,7 @@ type SFlow struct {
 	Log telegraf.Logger `toml:"-"`
 
 	addr    net.Addr
-	decoder *PacketDecoder
+	decoder *packetDecoder
 	closer  io.Closer
 	wg      sync.WaitGroup
 }
@@ -40,14 +40,14 @@ func (*SFlow) SampleConfig() string {
 }
 
 func (s *SFlow) Init() error {
-	s.decoder = NewDecoder()
+	s.decoder = newDecoder()
 	s.decoder.Log = s.Log
 	return nil
 }
 
 // Start starts this sFlow listener listening on the configured network for sFlow packets
 func (s *SFlow) Start(acc telegraf.Accumulator) error {
-	s.decoder.OnPacket(func(p *V5Format) {
+	s.decoder.OnPacket(func(p *v5Format) {
 		metrics := makeMetrics(p)
 		for _, m := range metrics {
 			acc.AddMetric(m)
@@ -84,13 +84,13 @@ func (s *SFlow) Start(acc telegraf.Accumulator) error {
 }
 
 // Gather is a NOOP for sFlow as it receives, asynchronously, sFlow network packets
-func (s *SFlow) Gather(_ telegraf.Accumulator) error {
+func (*SFlow) Gather(telegraf.Accumulator) error {
 	return nil
 }
 
 func (s *SFlow) Stop() {
 	if s.closer != nil {
-		s.closer.Close() //nolint:revive // ignore the returned error as we cannot do anything about it anyway
+		s.closer.Close()
 	}
 	s.wg.Wait()
 }
@@ -119,7 +119,7 @@ func (s *SFlow) process(acc telegraf.Accumulator, buf []byte) {
 	}
 }
 
-func listenUDP(network string, address string) (*net.UDPConn, error) {
+func listenUDP(network, address string) (*net.UDPConn, error) {
 	switch network {
 	case "udp", "udp4", "udp6":
 		addr, err := net.ResolveUDPAddr(network, address)

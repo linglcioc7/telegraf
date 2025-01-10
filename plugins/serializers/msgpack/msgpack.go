@@ -2,15 +2,11 @@ package msgpack
 
 import (
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
 // Serializer encodes metrics in MessagePack format
 type Serializer struct{}
-
-// NewSerializer creates a msgpack.Serializer
-func NewSerializer() *Serializer {
-	return &Serializer{}
-}
 
 func marshalMetric(buf []byte, metric telegraf.Metric) ([]byte, error) {
 	return (&Metric{
@@ -40,4 +36,12 @@ func (s *Serializer) SerializeBatch(metrics []telegraf.Metric) ([]byte, error) {
 		}
 	}
 	return buf, nil
+}
+
+func init() {
+	serializers.Add("msgpack",
+		func() telegraf.Serializer {
+			return &Serializer{}
+		},
+	)
 }

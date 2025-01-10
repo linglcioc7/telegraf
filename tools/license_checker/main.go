@@ -147,9 +147,10 @@ func main() {
 					debugf("ignoring unknown element %T (%v)", v, v)
 				}
 			}
+			name = strings.TrimSpace(name)
 
 			info := packageInfo{
-				name:    strings.TrimSpace(name),
+				name:    name,
 				version: dependencies[name],
 				url:     strings.TrimSpace(link),
 				license: strings.TrimSpace(license),
@@ -177,8 +178,8 @@ func main() {
 
 	// Get the superset of licenses
 	if debug {
-		licenseSet := map[string]bool{}
-		licenseNames := []string{}
+		licenseSet := make(map[string]bool, len(packageInfos))
+		licenseNames := make([]string, 0, len(packageInfos))
 		for _, info := range packageInfos {
 			if found := licenseSet[info.license]; !found {
 				licenseNames = append(licenseNames, info.license)
@@ -204,10 +205,10 @@ func main() {
 		// Check if we got a whitelist entry for the package
 		if ok, found := override.Check(info.name, info.version, info.spdx); found {
 			if ok {
-				log.Printf("OK: %q (%s) (whitelist)", info.name, info.license)
+				log.Printf("OK: \"%s@%s\" (%s) (whitelist)", info.name, info.version, info.license)
 				succeeded++
 			} else {
-				log.Printf("ERR: %q (%s) %s does not match whitelist", info.name, info.license, info.spdx)
+				log.Printf("ERR: \"%s@%s\" (%s) %s does not match whitelist", info.name, info.version, info.license, info.spdx)
 				failed++
 			}
 			continue

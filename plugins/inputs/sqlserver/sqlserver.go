@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Azure/go-autorest/autorest/adal"
-	mssql "github.com/denisenkom/go-mssqldb"
+	mssql "github.com/microsoft/go-mssqldb"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
@@ -25,16 +25,17 @@ var sampleConfig string
 
 // SQLServer struct
 type SQLServer struct {
-	Servers      []config.Secret `toml:"servers"`
-	QueryTimeout config.Duration `toml:"query_timeout"`
-	AuthMethod   string          `toml:"auth_method"`
-	QueryVersion int             `toml:"query_version" deprecated:"1.16.0;use 'database_type' instead"`
-	AzureDB      bool            `toml:"azuredb" deprecated:"1.16.0;use 'database_type' instead"`
-	DatabaseType string          `toml:"database_type"`
-	IncludeQuery []string        `toml:"include_query"`
-	ExcludeQuery []string        `toml:"exclude_query"`
-	HealthMetric bool            `toml:"health_metric"`
-	Log          telegraf.Logger `toml:"-"`
+	Servers      []*config.Secret `toml:"servers"`
+	QueryTimeout config.Duration  `toml:"query_timeout"`
+	AuthMethod   string           `toml:"auth_method"`
+	ClientID     string           `toml:"client_id"`
+	QueryVersion int              `toml:"query_version" deprecated:"1.16.0;1.35.0;use 'database_type' instead"`
+	AzureDB      bool             `toml:"azuredb" deprecated:"1.16.0;1.35.0;use 'database_type' instead"`
+	DatabaseType string           `toml:"database_type"`
+	IncludeQuery []string         `toml:"include_query"`
+	ExcludeQuery []string         `toml:"exclude_query"`
+	HealthMetric bool             `toml:"health_metric"`
+	Log          telegraf.Logger  `toml:"-"`
 
 	pools       []*sql.DB
 	queries     MapQuery
@@ -62,10 +63,11 @@ type HealthMetric struct {
 const defaultServer = "Server=.;app name=telegraf;log=1;"
 
 const (
-	typeAzureSQLDB              = "AzureSQLDB"
-	typeAzureSQLManagedInstance = "AzureSQLManagedInstance"
-	typeAzureSQLPool            = "AzureSQLPool"
-	typeSQLServer               = "SQLServer"
+	typeAzureSQLDB                 = "AzureSQLDB"
+	typeAzureSQLManagedInstance    = "AzureSQLManagedInstance"
+	typeAzureSQLPool               = "AzureSQLPool"
+	typeSQLServer                  = "SQLServer"
+	typeAzureArcSQLManagedInstance = "AzureArcSQLManagedInstance"
 )
 
 const (
@@ -93,6 +95,7 @@ func (s *SQLServer) initQueries() error {
 	// Constant definitions for type "AzureSQLDB" start with sqlAzureDB
 	// Constant definitions for type "AzureSQLManagedInstance" start with sqlAzureMI
 	// Constant definitions for type "AzureSQLPool" start with sqlAzurePool
+	// Constant definitions for type "AzureArcSQLManagedInstance" start with sqlAzureArcMI
 	// Constant definitions for type "SQLServer" start with sqlServer
 	if s.DatabaseType == typeAzureSQLDB {
 		queries["AzureSQLDBResourceStats"] = Query{ScriptName: "AzureSQLDBResourceStats", Script: sqlAzureDBResourceStats, ResultByRow: false}
@@ -125,7 +128,16 @@ func (s *SQLServer) initQueries() error {
 		queries["AzureSQLPoolPerformanceCounters"] =
 			Query{ScriptName: "AzureSQLPoolPerformanceCounters", Script: sqlAzurePoolPerformanceCounters, ResultByRow: false}
 		queries["AzureSQLPoolSchedulers"] = Query{ScriptName: "AzureSQLPoolSchedulers", Script: sqlAzurePoolSchedulers, ResultByRow: false}
-	} else if s.DatabaseType == typeSQLServer { //These are still V2 queries and have not been refactored yet.
+	} else if s.DatabaseType == typeAzureArcSQLManagedInstance {
+		queries["AzureArcSQLMIDatabaseIO"] = Query{ScriptName: "AzureArcSQLMIDatabaseIO", Script: sqlAzureArcMIDatabaseIO, ResultByRow: false}
+		queries["AzureArcSQLMIServerProperties"] = Query{ScriptName: "AzureArcSQLMIServerProperties", Script: sqlAzureArcMIProperties, ResultByRow: false}
+		queries["AzureArcSQLMIOsWaitstats"] = Query{ScriptName: "AzureArcSQLMIOsWaitstats", Script: sqlAzureArcMIOsWaitStats, ResultByRow: false}
+		queries["AzureArcSQLMIMemoryClerks"] = Query{ScriptName: "AzureArcSQLMIMemoryClerks", Script: sqlAzureArcMIMemoryClerks, ResultByRow: false}
+		queries["AzureArcSQLMIPerformanceCounters"] =
+			Query{ScriptName: "AzureArcSQLMIPerformanceCounters", Script: sqlAzureArcMIPerformanceCounters, ResultByRow: false}
+		queries["AzureArcSQLMIRequests"] = Query{ScriptName: "AzureArcSQLMIRequests", Script: sqlAzureArcMIRequests, ResultByRow: false}
+		queries["AzureArcSQLMISchedulers"] = Query{ScriptName: "AzureArcSQLMISchedulers", Script: sqlAzureArcMISchedulers, ResultByRow: false}
+	} else if s.DatabaseType == typeSQLServer { // These are still V2 queries and have not been refactored yet.
 		queries["SQLServerPerformanceCounters"] = Query{ScriptName: "SQLServerPerformanceCounters", Script: sqlServerPerformanceCounters, ResultByRow: false}
 		queries["SQLServerWaitStatsCategorized"] = Query{ScriptName: "SQLServerWaitStatsCategorized", Script: sqlServerWaitStatsCategorized, ResultByRow: false}
 		queries["SQLServerDatabaseIO"] = Query{ScriptName: "SQLServerDatabaseIO", Script: sqlServerDatabaseIO, ResultByRow: false}
@@ -140,6 +152,8 @@ func (s *SQLServer) initQueries() error {
 		queries["SQLServerDatabaseReplicaStates"] =
 			Query{ScriptName: "SQLServerDatabaseReplicaStates", Script: sqlServerDatabaseReplicaStates, ResultByRow: false}
 		queries["SQLServerRecentBackups"] = Query{ScriptName: "SQLServerRecentBackups", Script: sqlServerRecentBackups, ResultByRow: false}
+		queries["SQLServerPersistentVersionStore"] =
+			Query{ScriptName: "SQLServerPersistentVersionStore", Script: sqlServerPersistentVersionStore, ResultByRow: false}
 	} else {
 		// If this is an AzureDB instance, grab some extra metrics
 		if s.AzureDB {
@@ -202,26 +216,28 @@ func (s *SQLServer) Gather(acc telegraf.Accumulator) error {
 	var healthMetrics = make(map[string]*HealthMetric)
 
 	for i, pool := range s.pools {
+		dnsSecret, err := s.Servers[i].Get()
+		if err != nil {
+			acc.AddError(err)
+			continue
+		}
+		dsn := dnsSecret.String()
+		dnsSecret.Destroy()
+
 		for _, query := range s.queries {
 			wg.Add(1)
-			go func(pool *sql.DB, query Query, serverIndex int) {
+			go func(pool *sql.DB, query Query, dsn string) {
 				defer wg.Done()
-				dsn, err := s.Servers[serverIndex].Get()
-				if err != nil {
-					acc.AddError(err)
-					return
-				}
-				defer config.ReleaseSecret(dsn)
-				queryError := s.gatherServer(pool, query, acc, string(dsn))
+				queryError := s.gatherServer(pool, query, acc, dsn)
 
 				if s.HealthMetric {
 					mutex.Lock()
-					s.gatherHealth(healthMetrics, string(dsn), queryError)
+					gatherHealth(healthMetrics, dsn, queryError)
 					mutex.Unlock()
 				}
 
 				acc.AddError(queryError)
-			}(pool, query, i)
+			}(pool, query, dsn)
 		}
 	}
 
@@ -259,8 +275,8 @@ func (s *SQLServer) Start(acc telegraf.Accumulator) error {
 			// Use the DSN (connection string) directly. In this case,
 			// empty username/password causes use of Windows
 			// integrated authentication.
-			pool, err = sql.Open("mssql", string(dsn))
-			config.ReleaseSecret(dsn)
+			pool, err = sql.Open("mssql", dsn.String())
+			dsn.Destroy()
 			if err != nil {
 				acc.AddError(err)
 				continue
@@ -287,8 +303,8 @@ func (s *SQLServer) Start(acc telegraf.Accumulator) error {
 				acc.AddError(err)
 				continue
 			}
-			connector, err := mssql.NewAccessTokenConnector(string(dsn), tokenProvider)
-			config.ReleaseSecret(dsn)
+			connector, err := mssql.NewAccessTokenConnector(dsn.String(), tokenProvider)
+			dsn.Destroy()
 			if err != nil {
 				acc.AddError(fmt.Errorf("error creating the SQL connector: %w", err))
 				continue
@@ -374,7 +390,7 @@ func (s *SQLServer) accRow(query Query, acc telegraf.Accumulator, row scanner) e
 
 	// measurement: identified by the header
 	// tags: all other fields of type string
-	tags := map[string]string{}
+	tags := make(map[string]string, len(columnMap)+1)
 	var measurement string
 	for header, val := range columnMap {
 		if str, ok := (*val).(string); ok {
@@ -409,7 +425,7 @@ func (s *SQLServer) accRow(query Query, acc telegraf.Accumulator, row scanner) e
 }
 
 // gatherHealth stores info about any query errors in the healthMetrics map
-func (s *SQLServer) gatherHealth(healthMetrics map[string]*HealthMetric, serv string, queryError error) {
+func gatherHealth(healthMetrics map[string]*HealthMetric, serv string, queryError error) {
 	if healthMetrics[serv] == nil {
 		healthMetrics[serv] = &HealthMetric{}
 	}
@@ -450,7 +466,8 @@ func (s *SQLServer) getDatabaseTypeToLog() string {
 
 func (s *SQLServer) Init() error {
 	if len(s.Servers) == 0 {
-		s.Log.Warn("Warning: Server list is empty.")
+		srv := config.NewSecret([]byte(defaultServer))
+		s.Servers = append(s.Servers, &srv)
 	}
 
 	return nil
@@ -494,6 +511,7 @@ func (s *SQLServer) getTokenProvider() (func() (string, error), error) {
 	}
 
 	// return acquired token
+	//nolint:unparam // token provider function always returns nil error in this scenario
 	return func() (string, error) {
 		return tokenString, nil
 	}, nil
@@ -505,7 +523,7 @@ func (s *SQLServer) loadToken() (*adal.Token, error) {
 	// however it's been structured here to allow extending the cache mechanism to a different approach in future
 
 	if s.adalToken == nil {
-		return nil, fmt.Errorf("token is nil or failed to load existing token")
+		return nil, errors.New("token is nil or failed to load existing token")
 	}
 
 	return s.adalToken, nil
@@ -520,9 +538,17 @@ func (s *SQLServer) refreshToken() (*adal.Token, error) {
 	}
 
 	// get new token for the resource id
-	spt, err := adal.NewServicePrincipalTokenFromMSI(msiEndpoint, sqlAzureResourceID)
-	if err != nil {
-		return nil, err
+	var spt *adal.ServicePrincipalToken
+	if s.ClientID == "" {
+		spt, err = adal.NewServicePrincipalTokenFromMSI(msiEndpoint, sqlAzureResourceID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		spt, err = adal.NewServicePrincipalTokenFromMSIWithUserAssignedID(msiEndpoint, sqlAzureResourceID, s.ClientID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// ensure token is fresh
@@ -547,7 +573,6 @@ func (s *SQLServer) refreshToken() (*adal.Token, error) {
 func init() {
 	inputs.Add("sqlserver", func() telegraf.Input {
 		return &SQLServer{
-			Servers:    []config.Secret{config.NewSecret([]byte(defaultServer))},
 			AuthMethod: "connection_string",
 		}
 	})

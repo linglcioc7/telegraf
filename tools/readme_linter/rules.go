@@ -13,6 +13,17 @@ func firstSection(t *T, root ast.Node) error {
 	var n ast.Node
 	n = root.FirstChild()
 
+	// Ignore HTML comments such as linter ignore sections
+	for {
+		if n == nil {
+			break
+		}
+		if _, ok := n.(*ast.HTMLBlock); !ok {
+			break
+		}
+		n = n.NextSibling()
+	}
+
 	t.assertKind(ast.KindHeading, n)
 	t.assertHeadingLevel(1, n)
 	t.assertFirstChildRegexp(` Plugin$`, n)
@@ -21,9 +32,8 @@ func firstSection(t *T, root ast.Node) error {
 	n = n.NextSibling()
 	t.assertKind(ast.KindParagraph, n)
 	length := len(n.Text(t.markdown))
-	min := 30
-	if length < min {
-		t.assertNodef(n, "short first section. Please add short description of plugin. length %d, minimum %d", length, min)
+	if length < 30 {
+		t.assertNodef(n, "short first section. Please add short description of plugin. length %d, minimum 30", length)
 	}
 
 	return nil
@@ -82,32 +92,28 @@ func noLongLinesInParagraphs(threshold int) func(*T, ast.Node) error {
 	return func(t *T, root ast.Node) error {
 		// We're looking for long lines in paragraphs. Find paragraphs
 		// first, then which lines are in paragraphs
-		paraLines := []int{}
+		paraLines := make([]int, 0)
 		for n := root.FirstChild(); n != nil; n = n.NextSibling() {
 			var p *ast.Paragraph
 			var ok bool
 			if p, ok = n.(*ast.Paragraph); !ok {
-				continue //only looking for paragraphs
+				continue // only looking for paragraphs
 			}
 
 			segs := p.Lines()
 			for _, seg := range segs.Sliced(0, segs.Len()) {
 				line := t.line(seg.Start)
 				paraLines = append(paraLines, line)
-				// t.printFileLine(line)
-				// fmt.Printf("paragraph line\n")
 			}
 		}
 
 		// Find long lines in the whole file
-		longLines := []int{}
+		longLines := make([]int, 0, len(t.newlineOffsets))
 		last := 0
 		for i, cur := range t.newlineOffsets {
 			length := cur - last - 1 // -1 to exclude the newline
 			if length > threshold {
 				longLines = append(longLines, i)
-				// t.printFileLine(i)
-				// fmt.Printf("long line\n")
 			}
 			last = cur
 		}
@@ -115,7 +121,7 @@ func noLongLinesInParagraphs(threshold int) func(*T, ast.Node) error {
 		// Merge both lists
 		p := 0
 		l := 0
-		bads := []int{}
+		bads := make([]int, 0, max(len(paraLines), len(longLines)))
 		for p < len(paraLines) && l < len(longLines) {
 			long := longLines[l]
 			para := paraLines[p]

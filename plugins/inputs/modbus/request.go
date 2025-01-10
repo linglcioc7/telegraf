@@ -1,14 +1,16 @@
 package modbus
 
 import (
+	"math"
 	"sort"
+
+	"github.com/influxdata/telegraf"
 )
 
 type request struct {
 	address uint16
 	length  uint16
 	fields  []field
-	tags    map[string]string
 }
 
 func countRegisters(requests []request) uint64 {
@@ -26,18 +28,29 @@ func splitMaxBatchSize(g request, maxBatchSize uint16) []request {
 	idx := 0
 	for start := g.address; start < g.address+g.length; {
 		current := request{
-			fields:  []field{},
 			address: start,
 		}
+
+		// Initialize the end to a safe value avoiding infinite loops
+		end := g.address + g.length
+		var batchEnd uint16
+		if start >= math.MaxUint16-maxBatchSize {
+			batchEnd = math.MaxUint16
+		} else {
+			batchEnd = start + maxBatchSize
+		}
 		for _, f := range g.fields[idx:] {
-			// End of field still fits into the batch
-			if f.address+f.length <= start+maxBatchSize {
-				current.fields = append(current.fields, f)
-				idx++
+			// If the current field exceeds the batch size we need to split
+			// the request here
+			if f.address+f.length > batchEnd {
+				break
 			}
+			// End of field still fits into the batch so add it to the request
+			current.fields = append(current.fields, f)
+			end = f.address + f.length
+			idx++
 		}
 
-		end := start + maxBatchSize
 		if end > g.address+g.length {
 			end = g.address + g.length
 		}
@@ -125,7 +138,7 @@ func optimizeGroup(g request, maxBatchSize uint16) []request {
 	return requests
 }
 
-func optimitzeGroupWithinLimits(g request, maxBatchSize uint16, maxExtraRegisters uint16) []request {
+func optimizeGroupWithinLimits(g request, params groupingParams) []request {
 	if len(g.fields) == 0 {
 		return nil
 	}
@@ -139,8 +152,15 @@ func optimitzeGroupWithinLimits(g request, maxBatchSize uint16, maxExtraRegister
 	for i := 1; i <= len(g.fields)-1; i++ {
 		// Check if we need to interrupt the current chunk and require a new one
 		holeSize := g.fields[i].address - (g.fields[i-1].address + g.fields[i-1].length)
-		needInterrupt := holeSize > maxExtraRegisters                                                     // too far apart
-		needInterrupt = needInterrupt || currentRequest.length+holeSize+g.fields[i].length > maxBatchSize // too large
+		if g.fields[i].address < g.fields[i-1].address+g.fields[i-1].length {
+			params.log.Warnf(
+				"Request at %d with length %d overlaps with next request at %d",
+				g.fields[i-1].address, g.fields[i-1].length, g.fields[i].address,
+			)
+			holeSize = 0
+		}
+		needInterrupt := holeSize > params.maxExtraRegisters                                                     // too far apart
+		needInterrupt = needInterrupt || currentRequest.length+holeSize+g.fields[i].length > params.maxBatchSize // too large
 		if !needInterrupt {
 			// Still safe to add the field to the current request
 			currentRequest.length = g.fields[i].address + g.fields[i].length - currentRequest.address
@@ -161,16 +181,16 @@ func optimitzeGroupWithinLimits(g request, maxBatchSize uint16, maxExtraRegister
 
 type groupingParams struct {
 	// Maximum size of a request in registers
-	MaxBatchSize uint16
-	// Optimization to use for grouping register groups to requests.
-	// Also put potential optimization parameters here
-	Optimization      string
-	MaxExtraRegisters uint16
-	// Will force reads to start at zero (if possible) while respecting
-	// the max-batch size.
-	EnforceFromZero bool
-	// Tags to add for the requests
-	Tags map[string]string
+	maxBatchSize uint16
+	// optimization to use for grouping register groups to requests, Also put potential optimization parameters here
+	optimization      string
+	maxExtraRegisters uint16
+	// Will force reads to start at zero (if possible) while respecting the max-batch size.
+	enforceFromZero bool
+	// tags to add for the requests
+	tags map[string]string
+	// log facility to inform the user
+	log telegraf.Logger
 }
 
 func groupFieldsToRequests(fields []field, params groupingParams) []request {
@@ -192,6 +212,14 @@ func groupFieldsToRequests(fields []field, params groupingParams) []request {
 	var groups []request
 	var current request
 	for _, f := range fields {
+		// Add tags from higher up
+		if f.tags == nil {
+			f.tags = make(map[string]string, len(params.tags))
+		}
+		for k, v := range params.tags {
+			f.tags[k] = v
+		}
+
 		// Check if we need to interrupt the current chunk and require a new one
 		if current.length > 0 && f.address == current.address+current.length {
 			// Still safe to add the field to the current request
@@ -207,7 +235,6 @@ func groupFieldsToRequests(fields []field, params groupingParams) []request {
 			groups = append(groups, current)
 		}
 		current = request{
-			fields:  []field{},
 			address: f.address,
 			length:  f.length,
 		}
@@ -224,18 +251,18 @@ func groupFieldsToRequests(fields []field, params groupingParams) []request {
 	}
 
 	// Enforce the first read to start at zero if the option is set
-	if params.EnforceFromZero {
+	if params.enforceFromZero {
 		groups[0].length += groups[0].address
 		groups[0].address = 0
 	}
 
 	var requests []request
-	switch params.Optimization {
+	switch params.optimization {
 	case "shrink":
 		// Shrink request by striping leading and trailing fields with an omit flag set
 		for _, g := range groups {
 			if len(g.fields) > 0 {
-				requests = append(requests, shrinkGroup(g, params.MaxBatchSize)...)
+				requests = append(requests, shrinkGroup(g, params.maxBatchSize)...)
 			}
 		}
 	case "rearrange":
@@ -243,7 +270,7 @@ func groupFieldsToRequests(fields []field, params groupingParams) []request {
 		// registers while keeping the number of requests
 		for _, g := range groups {
 			if len(g.fields) > 0 {
-				requests = append(requests, optimizeGroup(g, params.MaxBatchSize)...)
+				requests = append(requests, optimizeGroup(g, params.maxBatchSize)...)
 			}
 		}
 	case "aggressive":
@@ -255,31 +282,24 @@ func groupFieldsToRequests(fields []field, params groupingParams) []request {
 				total.fields = append(total.fields, g.fields...)
 			}
 		}
-		requests = optimizeGroup(total, params.MaxBatchSize)
+		requests = optimizeGroup(total, params.maxBatchSize)
 	case "max_insert":
-		// Similar to aggressive but keeps the number of touched registers bellow a threshold
+		// Similar to aggressive but keeps the number of touched registers below a threshold
 		var total request
 		for _, g := range groups {
 			if len(g.fields) > 0 {
 				total.fields = append(total.fields, g.fields...)
 			}
 		}
-		requests = optimitzeGroupWithinLimits(total, params.MaxBatchSize, params.MaxExtraRegisters)
+		requests = optimizeGroupWithinLimits(total, params)
 	default:
 		// no optimization
 		for _, g := range groups {
 			if len(g.fields) > 0 {
-				requests = append(requests, splitMaxBatchSize(g, params.MaxBatchSize)...)
+				requests = append(requests, splitMaxBatchSize(g, params.maxBatchSize)...)
 			}
 		}
 	}
 
-	// Copy the tags
-	for i := range requests {
-		requests[i].tags = make(map[string]string)
-		for k, v := range params.Tags {
-			requests[i].tags[k] = v
-		}
-	}
 	return requests
 }
