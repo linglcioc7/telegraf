@@ -4,9 +4,10 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestAzureSQLIntegration_ElasticPool_ResourceStats_Query(t *testing.T) {
@@ -19,10 +20,10 @@ func TestAzureSQLIntegration_ElasticPool_ResourceStats_Query(t *testing.T) {
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolResourceStats"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",
@@ -48,7 +49,7 @@ func TestAzureSQLIntegration_ElasticPool_ResourceStats_Query(t *testing.T) {
 	require.True(t, acc.HasFloatField("sqlserver_pool_resource_stats", "avg_allocated_storage_percent"))
 
 	// This query should only return one row
-	require.Equal(t, 1, len(acc.Metrics))
+	require.Len(t, acc.Metrics, 1)
 	server.Stop()
 }
 
@@ -62,10 +63,10 @@ func TestAzureSQLIntegration_ElasticPool_ResourceGovernance_Query(t *testing.T) 
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolResourceGovernance"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",
@@ -112,7 +113,7 @@ func TestAzureSQLIntegration_ElasticPool_ResourceGovernance_Query(t *testing.T) 
 	require.True(t, acc.HasInt64Field("sqlserver_pool_resource_governance", "volume_type_pfs_iops"))
 
 	// This query should only return one row
-	require.Equal(t, 1, len(acc.Metrics))
+	require.Len(t, acc.Metrics, 1)
 	server.Stop()
 }
 
@@ -126,10 +127,10 @@ func TestAzureSQLIntegration_ElasticPool_DatabaseIO_Query(t *testing.T) {
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolDatabaseIO"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",
@@ -171,10 +172,10 @@ func TestAzureSQLIntegration_ElasticPool_OsWaitStats_Query(t *testing.T) {
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolOsWaitStats"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",
@@ -209,10 +210,10 @@ func TestAzureSQLIntegration_ElasticPool_MemoryClerks_Query(t *testing.T) {
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolMemoryClerks"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",
@@ -242,10 +243,10 @@ func TestAzureSQLIntegration_ElasticPool_PerformanceCounters_Query(t *testing.T)
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolPerformanceCounters"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",
@@ -277,10 +278,10 @@ func TestAzureSQLIntegration_ElasticPool_Schedulers_Query(t *testing.T) {
 	}
 
 	connectionString := os.Getenv("AZURESQL_POOL_CONNECTION_STRING")
-	serversList := []config.Secret{config.NewSecret([]byte(connectionString))}
+	sl := config.NewSecret([]byte(connectionString))
 
 	server := &SQLServer{
-		Servers:      serversList,
+		Servers:      []*config.Secret{&sl},
 		IncludeQuery: []string{"AzureSQLPoolSchedulers"},
 		AuthMethod:   "connection_string",
 		DatabaseType: "AzureSQLPool",

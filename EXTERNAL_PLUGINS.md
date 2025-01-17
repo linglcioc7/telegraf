@@ -9,7 +9,7 @@ Pull requests welcome.
 
 - [awsalarms](https://github.com/vipinvkmenon/awsalarms) - Simple plugin to gather/monitor alarms generated  in AWS.
 - [octoprint](https://github.com/BattleBas/octoprint-telegraf-plugin) - Gather 3d print information from the octoprint API.
-- [opcda](https://github.com/lpc921/telegraf-execd-opcda) - Gather data from [OPC Fundation's Data Access (DA)](https://opcfoundation.org/about/opc-technologies/opc-classic/) protocol for industrial automation.
+- [opcda](https://github.com/lpc921/telegraf-execd-opcda) - Gather data from [OPC Foundation's Data Access (DA)](https://opcfoundation.org/about/opc-technologies/opc-classic/) protocol for industrial automation.
 - [open-hardware-monitor](https://github.com/marianob85/open_hardware_monitor-telegraf-plugin) - Gather sensors data provided by [Open Hardware Monitor](http://openhardwaremonitor.org)
 - [plex](https://github.com/russorat/telegraf-webhooks-plex) - Listens for events from Plex Media Server [Webhooks](https://support.plex.tv/articles/115002267687-webhooks/).
 - [rand](https://github.com/ssoroka/rand) - Generate random numbers
@@ -36,6 +36,7 @@ Pull requests welcome.
 - [libvirt](https://gitlab.com/warrenio/tools/telegraf-input-libvirt) - Gather libvirt domain stats, based on a historical Telegraf implementation [libvirt](https://libvirt.org/)
 - [bacnet](https://github.com/JurajMarcin/telegraf-bacnet) - Gather statistics from BACnet devices, with support for device discovery and Change of Value subscriptions
 - [tado](https://github.com/zoeimogen/tado-telegraf-plugin) - Gather zone temperature settings and current temperature/humidity readings from Tado
+- [homekit](https://github.com/hdecarne-github/homekit-telegraf-plugin) - Gather smart home statistics from [HomeKit](https://en.wikipedia.org/wiki/HomeKit) devices via Home Hub automation
 
 ## Outputs
 

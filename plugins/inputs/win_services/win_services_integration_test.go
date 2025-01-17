@@ -17,15 +17,19 @@ func TestListIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	provider := &MgProvider{}
+	provider := &mgProvider{}
 	scmgr, err := provider.Connect()
 	require.NoError(t, err)
-	defer scmgr.Disconnect()
+	defer func() {
+		err := scmgr.Disconnect()
+		require.NoError(t, err)
+	}()
 
 	winServices := &WinServices{
 		ServiceNames: KnownServices,
 	}
-	winServices.Init()
+
+	require.NoError(t, winServices.Init())
 	services, err := winServices.listServices(scmgr)
 	require.NoError(t, err)
 	require.Len(t, services, 2, "Different number of services")
@@ -37,15 +41,19 @@ func TestEmptyListIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	provider := &MgProvider{}
+	provider := &mgProvider{}
 	scmgr, err := provider.Connect()
 	require.NoError(t, err)
-	defer scmgr.Disconnect()
+	defer func() {
+		err := scmgr.Disconnect()
+		require.NoError(t, err)
+	}()
 
 	winServices := &WinServices{
-		ServiceNames: []string{},
+		ServiceNames: make([]string, 0),
 	}
-	winServices.Init()
+
+	require.NoError(t, winServices.Init())
 	services, err := winServices.listServices(scmgr)
 	require.NoError(t, err)
 	require.Condition(t, func() bool { return len(services) > 20 }, "Too few service")
@@ -58,9 +66,10 @@ func TestGatherErrorsIntegration(t *testing.T) {
 	ws := &WinServices{
 		Log:          testutil.Logger{},
 		ServiceNames: InvalidServices,
-		mgrProvider:  &MgProvider{},
+		mgrProvider:  &mgProvider{},
 	}
-	ws.Init()
+
+	require.NoError(t, ws.Init())
 	require.Len(t, ws.ServiceNames, 3, "Different number of services")
 	var acc testutil.Accumulator
 	require.NoError(t, ws.Gather(&acc))

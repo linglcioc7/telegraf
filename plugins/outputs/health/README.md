@@ -1,11 +1,15 @@
 # Health Output Plugin
 
-The health plugin provides a HTTP health check resource that can be configured
-to return a failure status code based on the value of a metric.
+This plugin provides a HTTP health check endpoint that can be configured to
+return failure status codes based on the value of a metric.
 
 When the plugin is healthy it will return a 200 response; when unhealthy it
-will return a 503 response.  The default state is healthy, one or more checks
+will return a 503 response. The default state is healthy, one or more checks
 must fail in order for the resource to enter the failed state.
+
+⭐ Telegraf v1.11.0
+🏷️ applications
+💻 all
 
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
@@ -41,6 +45,10 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## TLS server certificate and private key.
   # tls_cert = "/etc/telegraf/cert.pem"
   # tls_key = "/etc/telegraf/key.pem"
+
+  ## NOTE: Due to the way TOML is parsed, tables must be at the END of the
+  ## plugin definition, otherwise additional config options are read as part of
+  ## the table
 
   ## One or more check sub-tables should be defined, it is also recommended to
   ## use metric filtering to limit the metrics that flow into this output.

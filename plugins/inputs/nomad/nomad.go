@@ -10,6 +10,7 @@ import (
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/internal"
 	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
@@ -17,25 +18,14 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
-// Nomad configuration object
+const timeLayout = "2006-01-02 15:04:05 -0700 MST"
+
 type Nomad struct {
-	URL string `toml:"url"`
-
+	URL             string          `toml:"url"`
 	ResponseTimeout config.Duration `toml:"response_timeout"`
-
 	tls.ClientConfig
 
 	roundTripper http.RoundTripper
-}
-
-const timeLayout = "2006-01-02 15:04:05 -0700 MST"
-
-func init() {
-	inputs.Add("nomad", func() telegraf.Input {
-		return &Nomad{
-			ResponseTimeout: config.Duration(5 * time.Second),
-		}
-	})
 }
 
 func (*Nomad) SampleConfig() string {
@@ -61,9 +51,8 @@ func (n *Nomad) Init() error {
 	return nil
 }
 
-// Gather, collects metrics from Nomad endpoint
 func (n *Nomad) Gather(acc telegraf.Accumulator) error {
-	summaryMetrics := &MetricsSummary{}
+	summaryMetrics := &metricsSummary{}
 	err := n.loadJSON(n.URL+"/v1/metrics", summaryMetrics)
 	if err != nil {
 		return err
@@ -102,8 +91,8 @@ func (n *Nomad) loadJSON(url string, v interface{}) error {
 }
 
 // buildNomadMetrics, it builds all the metrics and adds them to the accumulator)
-func buildNomadMetrics(acc telegraf.Accumulator, summaryMetrics *MetricsSummary) error {
-	t, err := time.Parse(timeLayout, summaryMetrics.Timestamp)
+func buildNomadMetrics(acc telegraf.Accumulator, summaryMetrics *metricsSummary) error {
+	t, err := internal.ParseTimestamp(timeLayout, summaryMetrics.Timestamp, nil)
 	if err != nil {
 		return fmt.Errorf("error parsing time: %w", err)
 	}
@@ -160,4 +149,12 @@ func buildNomadMetrics(acc telegraf.Accumulator, summaryMetrics *MetricsSummary)
 	}
 
 	return nil
+}
+
+func init() {
+	inputs.Add("nomad", func() telegraf.Input {
+		return &Nomad{
+			ResponseTimeout: config.Duration(5 * time.Second),
+		}
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/influxdata/telegraf"
+	logging "github.com/influxdata/telegraf/logger"
 	"github.com/influxdata/telegraf/selfstat"
 )
 
@@ -22,11 +23,12 @@ func (rp RunningProcessors) Less(i, j int) bool { return rp[i].Config.Order < rp
 
 // ProcessorConfig containing a name and filter
 type ProcessorConfig struct {
-	Name   string
-	Alias  string
-	ID     string
-	Order  int64
-	Filter Filter
+	Name     string
+	Alias    string
+	ID       string
+	Order    int64
+	Filter   Filter
+	LogLevel string
 }
 
 func NewRunningProcessor(processor telegraf.StreamingProcessor, config *ProcessorConfig) *RunningProcessor {
@@ -36,10 +38,13 @@ func NewRunningProcessor(processor telegraf.StreamingProcessor, config *Processo
 	}
 
 	processErrorsRegister := selfstat.Register("process", "errors", tags)
-	logger := NewLogger("processors", config.Name, config.Alias)
-	logger.OnErr(func() {
+	logger := logging.New("processors", config.Name, config.Alias)
+	logger.RegisterErrorCallback(func() {
 		processErrorsRegister.Incr(1)
 	})
+	if err := logger.SetLogLevel(config.LogLevel); err != nil {
+		logger.Error(err)
+	}
 	SetLoggerOnPlugin(processor, logger)
 
 	return &RunningProcessor{
@@ -49,7 +54,7 @@ func NewRunningProcessor(processor telegraf.StreamingProcessor, config *Processo
 	}
 }
 
-func (rp *RunningProcessor) metricFiltered(metric telegraf.Metric) {
+func (*RunningProcessor) metricFiltered(metric telegraf.Metric) {
 	metric.Drop()
 }
 
@@ -78,7 +83,7 @@ func (rp *RunningProcessor) LogName() string {
 	return logName("processors", rp.Config.Name, rp.Config.Alias)
 }
 
-func (rp *RunningProcessor) MakeMetric(metric telegraf.Metric) telegraf.Metric {
+func (*RunningProcessor) MakeMetric(metric telegraf.Metric) telegraf.Metric {
 	return metric
 }
 
@@ -87,7 +92,10 @@ func (rp *RunningProcessor) Start(acc telegraf.Accumulator) error {
 }
 
 func (rp *RunningProcessor) Add(m telegraf.Metric, acc telegraf.Accumulator) error {
-	if ok := rp.Config.Filter.Select(m); !ok {
+	ok, err := rp.Config.Filter.Select(m)
+	if err != nil {
+		rp.log.Errorf("filtering failed: %v", err)
+	} else if !ok {
 		// pass downstream
 		acc.AddMetric(m)
 		return nil

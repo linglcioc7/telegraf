@@ -12,7 +12,7 @@ import (
 type mockFetcher struct {
 }
 
-func (h *mockFetcher) Fetch(_ string) ([]hddtemp.Disk, error) {
+func (*mockFetcher) Fetch(string) ([]hddtemp.Disk, error) {
 	return []hddtemp.Disk{
 		{
 			DeviceName:  "Disk1",
@@ -28,6 +28,7 @@ func (h *mockFetcher) Fetch(_ string) ([]hddtemp.Disk, error) {
 		},
 	}, nil
 }
+
 func newMockFetcher() *mockFetcher {
 	return &mockFetcher{}
 }
@@ -43,7 +44,7 @@ func TestFetch(t *testing.T) {
 	err := hddTemp.Gather(acc)
 
 	require.NoError(t, err)
-	require.Equal(t, acc.NFields(), 2)
+	require.Equal(t, 2, acc.NFields())
 
 	var tests = []struct {
 		fields map[string]interface{}

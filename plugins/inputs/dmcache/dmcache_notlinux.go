@@ -6,10 +6,10 @@ import (
 	"github.com/influxdata/telegraf"
 )
 
-func (c *DMCache) Gather(acc telegraf.Accumulator) error {
+func (*DMCache) Gather(_ telegraf.Accumulator) error {
 	return nil
 }
 
 func dmSetupStatus() ([]string, error) {
-	return []string{}, nil
+	return make([]string, 0), nil
 }

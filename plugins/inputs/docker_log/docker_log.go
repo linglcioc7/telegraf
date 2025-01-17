@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/stdcopy"
 
@@ -23,21 +24,21 @@ import (
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/filter"
 	"github.com/influxdata/telegraf/internal/docker"
-	tlsint "github.com/influxdata/telegraf/plugins/common/tls"
+	common_tls "github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
 //go:embed sample.conf
 var sampleConfig string
 
-const (
-	defaultEndpoint = "unix:///var/run/docker.sock"
+var (
+	// ensure *DockerLogs implements telegraf.ServiceInput
+	_               telegraf.ServiceInput = (*DockerLogs)(nil)
+	containerStates                       = []string{"created", "restarting", "running", "removing", "paused", "exited", "dead"}
 )
 
-var (
-	containerStates = []string{"created", "restarting", "running", "removing", "paused", "exited", "dead"}
-	// ensure *DockerLogs implements telegraf.ServiceInput
-	_ telegraf.ServiceInput = (*DockerLogs)(nil)
+const (
+	defaultEndpoint = "unix:///var/run/docker.sock"
 )
 
 type DockerLogs struct {
@@ -52,19 +53,24 @@ type DockerLogs struct {
 	ContainerStateExclude []string        `toml:"container_state_exclude"`
 	IncludeSourceTag      bool            `toml:"source_tag"`
 
-	tlsint.ClientConfig
+	common_tls.ClientConfig
 
-	newEnvClient func() (Client, error)
-	newClient    func(string, *tls.Config) (Client, error)
+	newEnvClient func() (dockerClient, error)
+	newClient    func(string, *tls.Config) (dockerClient, error)
 
-	client          Client
+	client          dockerClient
 	labelFilter     filter.Filter
 	containerFilter filter.Filter
 	stateFilter     filter.Filter
-	opts            types.ContainerListOptions
+	opts            container.ListOptions
 	wg              sync.WaitGroup
 	mu              sync.Mutex
 	containerList   map[string]context.CancelFunc
+
+	// State of the plugin mapping container-ID to the timestamp of the
+	// last record processed
+	lastRecord    map[string]time.Time
+	lastRecordMtx sync.Mutex
 }
 
 func (*DockerLogs) SampleConfig() string {
@@ -111,12 +117,88 @@ func (d *DockerLogs) Init() error {
 	}
 
 	if filterArgs.Len() != 0 {
-		d.opts = types.ContainerListOptions{
+		d.opts = container.ListOptions{
 			Filters: filterArgs,
 		}
 	}
 
+	d.lastRecord = make(map[string]time.Time)
+
 	return nil
+}
+
+// Start is a noop which is required for a *DockerLogs to implement the telegraf.ServiceInput interface
+func (*DockerLogs) Start(telegraf.Accumulator) error {
+	return nil
+}
+
+func (d *DockerLogs) GetState() interface{} {
+	d.lastRecordMtx.Lock()
+	recordOffsets := make(map[string]time.Time, len(d.lastRecord))
+	for k, v := range d.lastRecord {
+		recordOffsets[k] = v
+	}
+	d.lastRecordMtx.Unlock()
+
+	return recordOffsets
+}
+
+func (d *DockerLogs) SetState(state interface{}) error {
+	recordOffsets, ok := state.(map[string]time.Time)
+	if !ok {
+		return fmt.Errorf("state has wrong type %T", state)
+	}
+	d.lastRecordMtx.Lock()
+	for k, v := range recordOffsets {
+		d.lastRecord[k] = v
+	}
+	d.lastRecordMtx.Unlock()
+
+	return nil
+}
+
+func (d *DockerLogs) Gather(acc telegraf.Accumulator) error {
+	ctx := context.Background()
+	acc.SetPrecision(time.Nanosecond)
+
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(d.Timeout))
+	defer cancel()
+	containers, err := d.client.ContainerList(ctx, d.opts)
+	if err != nil {
+		return err
+	}
+
+	for _, cntnr := range containers {
+		if d.containerInContainerList(cntnr.ID) {
+			continue
+		}
+
+		containerName := d.matchedContainerName(cntnr.Names)
+		if containerName == "" {
+			continue
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		d.addToContainerList(cntnr.ID, cancel)
+
+		// Start a new goroutine for every new container that has logs to collect
+		d.wg.Add(1)
+		go func(container types.Container) {
+			defer d.wg.Done()
+			defer d.removeFromContainerList(container.ID)
+
+			err = d.tailContainerLogs(ctx, acc, container, containerName)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				acc.AddError(err)
+			}
+		}(cntnr)
+	}
+	return nil
+}
+
+func (d *DockerLogs) Stop() {
+	d.cancelTails()
+	d.wg.Wait()
 }
 
 func (d *DockerLogs) addToContainerList(containerID string, cancel context.CancelFunc) {
@@ -151,57 +233,20 @@ func (d *DockerLogs) matchedContainerName(names []string) string {
 	// this array is always of length 1.
 	for _, name := range names {
 		trimmedName := strings.TrimPrefix(name, "/")
-		match := d.containerFilter.Match(trimmedName)
-		if match {
-			return trimmedName
+		if !strings.Contains(trimmedName, "/") {
+			match := d.containerFilter.Match(trimmedName)
+			if match {
+				return trimmedName
+			}
 		}
 	}
 	return ""
 }
 
-func (d *DockerLogs) Gather(acc telegraf.Accumulator) error {
-	ctx := context.Background()
-	acc.SetPrecision(time.Nanosecond)
-
+func (d *DockerLogs) hasTTY(ctx context.Context, cntnr types.Container) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(d.Timeout))
 	defer cancel()
-	containers, err := d.client.ContainerList(ctx, d.opts)
-	if err != nil {
-		return err
-	}
-
-	for _, container := range containers {
-		if d.containerInContainerList(container.ID) {
-			continue
-		}
-
-		containerName := d.matchedContainerName(container.Names)
-		if containerName == "" {
-			continue
-		}
-
-		ctx, cancel := context.WithCancel(context.Background())
-		d.addToContainerList(container.ID, cancel)
-
-		// Start a new goroutine for every new container that has logs to collect
-		d.wg.Add(1)
-		go func(container types.Container) {
-			defer d.wg.Done()
-			defer d.removeFromContainerList(container.ID)
-
-			err = d.tailContainerLogs(ctx, acc, container, containerName)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				acc.AddError(err)
-			}
-		}(container)
-	}
-	return nil
-}
-
-func (d *DockerLogs) hasTTY(ctx context.Context, container types.Container) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(d.Timeout))
-	defer cancel()
-	c, err := d.client.ContainerInspect(ctx, container.ID)
+	c, err := d.client.ContainerInspect(ctx, cntnr.ID)
 	if err != nil {
 		return false, err
 	}
@@ -211,10 +256,10 @@ func (d *DockerLogs) hasTTY(ctx context.Context, container types.Container) (boo
 func (d *DockerLogs) tailContainerLogs(
 	ctx context.Context,
 	acc telegraf.Accumulator,
-	container types.Container,
+	cntnr types.Container,
 	containerName string,
 ) error {
-	imageName, imageVersion := docker.ParseImage(container.Image)
+	imageName, imageVersion := docker.ParseImage(cntnr.Image)
 	tags := map[string]string{
 		"container_name":    containerName,
 		"container_image":   imageName,
@@ -222,36 +267,40 @@ func (d *DockerLogs) tailContainerLogs(
 	}
 
 	if d.IncludeSourceTag {
-		tags["source"] = hostnameFromID(container.ID)
+		tags["source"] = hostnameFromID(cntnr.ID)
 	}
 
 	// Add matching container labels as tags
-	for k, label := range container.Labels {
+	for k, label := range cntnr.Labels {
 		if d.labelFilter.Match(k) {
 			tags[k] = label
 		}
 	}
 
-	hasTTY, err := d.hasTTY(ctx, container)
+	hasTTY, err := d.hasTTY(ctx, cntnr)
 	if err != nil {
 		return err
 	}
 
-	tail := "0"
-	if d.FromBeginning {
-		tail = "all"
+	since := time.Time{}.Format(time.RFC3339Nano)
+	if !d.FromBeginning {
+		d.lastRecordMtx.Lock()
+		if ts, ok := d.lastRecord[cntnr.ID]; ok {
+			since = ts.Format(time.RFC3339Nano)
+		}
+		d.lastRecordMtx.Unlock()
 	}
 
-	logOptions := types.ContainerLogsOptions{
+	logOptions := container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Timestamps: true,
 		Details:    false,
 		Follow:     true,
-		Tail:       tail,
+		Since:      since,
 	}
 
-	logReader, err := d.client.ContainerLogs(ctx, container.ID, logOptions)
+	logReader, err := d.client.ContainerLogs(ctx, cntnr.ID, logOptions)
 	if err != nil {
 		return err
 	}
@@ -262,10 +311,23 @@ func (d *DockerLogs) tailContainerLogs(
 	//
 	// If the container is *not* using a TTY, streams for stdout and stderr are
 	// multiplexed.
+	var last time.Time
 	if hasTTY {
-		return tailStream(acc, tags, container.ID, logReader, "tty")
+		last, err = tailStream(acc, tags, cntnr.ID, logReader, "tty")
+	} else {
+		last, err = tailMultiplexed(acc, tags, cntnr.ID, logReader)
 	}
-	return tailMultiplexed(acc, tags, container.ID, logReader)
+	if err != nil {
+		return err
+	}
+
+	if ts, ok := d.lastRecord[cntnr.ID]; !ok || ts.Before(last) {
+		d.lastRecordMtx.Lock()
+		d.lastRecord[cntnr.ID] = last
+		d.lastRecordMtx.Unlock()
+	}
+
+	return nil
 }
 
 func parseLine(line []byte) (time.Time, string, error) {
@@ -297,7 +359,7 @@ func tailStream(
 	containerID string,
 	reader io.ReadCloser,
 	stream string,
-) error {
+) (time.Time, error) {
 	defer reader.Close()
 
 	tags := make(map[string]string, len(baseTags)+1)
@@ -308,6 +370,7 @@ func tailStream(
 
 	r := bufio.NewReaderSize(reader, 64*1024)
 
+	var lastTs time.Time
 	for {
 		line, err := r.ReadBytes('\n')
 
@@ -321,13 +384,18 @@ func tailStream(
 					"message":      message,
 				}, tags, ts)
 			}
+
+			// Store the last processed timestamp
+			if ts.After(lastTs) {
+				lastTs = ts
+			}
 		}
 
 		if err != nil {
 			if err == io.EOF {
-				return nil
+				return lastTs, nil
 			}
-			return err
+			return time.Time{}, err
 		}
 	}
 }
@@ -337,15 +405,17 @@ func tailMultiplexed(
 	tags map[string]string,
 	containerID string,
 	src io.ReadCloser,
-) error {
+) (time.Time, error) {
 	outReader, outWriter := io.Pipe()
 	errReader, errWriter := io.Pipe()
 
+	var tsStdout, tsStderr time.Time
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := tailStream(acc, tags, containerID, outReader, "stdout")
+		var err error
+		tsStdout, err = tailStream(acc, tags, containerID, outReader, "stdout")
 		if err != nil {
 			acc.AddError(err)
 		}
@@ -354,29 +424,28 @@ func tailMultiplexed(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := tailStream(acc, tags, containerID, errReader, "stderr")
+		var err error
+		tsStderr, err = tailStream(acc, tags, containerID, errReader, "stderr")
 		if err != nil {
 			acc.AddError(err)
 		}
 	}()
 
 	_, err := stdcopy.StdCopy(outWriter, errWriter, src)
-	outWriter.Close() //nolint:revive // we cannot do anything if the closing fails
-	errWriter.Close() //nolint:revive // we cannot do anything if the closing fails
-	src.Close()       //nolint:revive // we cannot do anything if the closing fails
+
+	// Ignore the returned errors as we cannot do anything if the closing fails
+	_ = outWriter.Close()
+	_ = errWriter.Close()
+	_ = src.Close()
 	wg.Wait()
-	return err
-}
 
-// Start is a noop which is required for a *DockerLogs to implement
-// the telegraf.ServiceInput interface
-func (d *DockerLogs) Start(telegraf.Accumulator) error {
-	return nil
-}
-
-func (d *DockerLogs) Stop() {
-	d.cancelTails()
-	d.wg.Wait()
+	if err != nil {
+		return time.Time{}, err
+	}
+	if tsStdout.After(tsStderr) {
+		return tsStdout, nil
+	}
+	return tsStderr, nil
 }
 
 // Following few functions have been inherited from telegraf docker input plugin
@@ -410,21 +479,21 @@ func (d *DockerLogs) createContainerStateFilters() error {
 	return nil
 }
 
-func init() {
-	inputs.Add("docker_log", func() telegraf.Input {
-		return &DockerLogs{
-			Timeout:       config.Duration(time.Second * 5),
-			Endpoint:      defaultEndpoint,
-			newEnvClient:  NewEnvClient,
-			newClient:     NewClient,
-			containerList: make(map[string]context.CancelFunc),
-		}
-	})
-}
-
 func hostnameFromID(id string) string {
 	if len(id) > 12 {
 		return id[0:12]
 	}
 	return id
+}
+
+func init() {
+	inputs.Add("docker_log", func() telegraf.Input {
+		return &DockerLogs{
+			Timeout:       config.Duration(time.Second * 5),
+			Endpoint:      defaultEndpoint,
+			newEnvClient:  newEnvClient,
+			newClient:     newClient,
+			containerList: make(map[string]context.CancelFunc),
+		}
+	})
 }

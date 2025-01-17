@@ -21,14 +21,11 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
-// defaultURL will set a default value that corresponds to the default value
-// used by RavenDB
-const defaultURL = "http://localhost:8080"
+const (
+	defaultURL     = "http://localhost:8080"
+	defaultTimeout = 5
+)
 
-const defaultTimeout = 5
-
-// RavenDB defines the configuration necessary for gathering metrics,
-// see the sample config for further details
 type RavenDB struct {
 	URL  string `toml:"url"`
 	Name string `toml:"name"`
@@ -53,6 +50,30 @@ type RavenDB struct {
 
 func (*RavenDB) SampleConfig() string {
 	return sampleConfig
+}
+
+func (r *RavenDB) Init() error {
+	if r.URL == "" {
+		r.URL = defaultURL
+	}
+
+	r.requestURLServer = r.URL + "/admin/monitoring/v1/server"
+	r.requestURLDatabases = r.URL + "/admin/monitoring/v1/databases" + prepareDBNamesURLPart(r.DbStatsDbs)
+	r.requestURLIndexes = r.URL + "/admin/monitoring/v1/indexes" + prepareDBNamesURLPart(r.IndexStatsDbs)
+	r.requestURLCollection = r.URL + "/admin/monitoring/v1/collections" + prepareDBNamesURLPart(r.IndexStatsDbs)
+
+	err := choice.CheckSlice(r.StatsInclude, []string{"server", "databases", "indexes", "collections"})
+	if err != nil {
+		return err
+	}
+
+	err = r.ensureClient()
+	if nil != err {
+		r.Log.Errorf("Error with Client %s", err)
+		return err
+	}
+
+	return nil
 }
 
 func (r *RavenDB) Gather(acc telegraf.Accumulator) error {
@@ -262,6 +283,11 @@ func (r *RavenDB) gatherDatabases(acc telegraf.Accumulator) {
 			"storage_indexes_used_data_file_in_mb":        dbResponse.Storage.IndexesUsedDataFileInMb,
 			"storage_total_allocated_storage_file_in_mb":  dbResponse.Storage.TotalAllocatedStorageFileInMb,
 			"storage_total_free_space_in_mb":              dbResponse.Storage.TotalFreeSpaceInMb,
+			"storage_io_read_operations":                  dbResponse.Storage.IoReadOperations,
+			"storage_io_write_operations":                 dbResponse.Storage.IoWriteOperations,
+			"storage_read_throughput_in_kb":               dbResponse.Storage.ReadThroughputInKb,
+			"storage_write_throughput_in_kb":              dbResponse.Storage.WriteThroughputInKb,
+			"storage_queue_length":                        dbResponse.Storage.QueueLength,
 			"time_since_last_backup_in_sec":               dbResponse.TimeSinceLastBackupInSec,
 			"uptime_in_sec":                               dbResponse.UptimeInSec,
 		}
@@ -356,30 +382,6 @@ func prepareDBNamesURLPart(dbNames []string) string {
 	}
 
 	return result
-}
-
-func (r *RavenDB) Init() error {
-	if r.URL == "" {
-		r.URL = defaultURL
-	}
-
-	r.requestURLServer = r.URL + "/admin/monitoring/v1/server"
-	r.requestURLDatabases = r.URL + "/admin/monitoring/v1/databases" + prepareDBNamesURLPart(r.DbStatsDbs)
-	r.requestURLIndexes = r.URL + "/admin/monitoring/v1/indexes" + prepareDBNamesURLPart(r.IndexStatsDbs)
-	r.requestURLCollection = r.URL + "/admin/monitoring/v1/collections" + prepareDBNamesURLPart(r.IndexStatsDbs)
-
-	err := choice.CheckSlice(r.StatsInclude, []string{"server", "databases", "indexes", "collections"})
-	if err != nil {
-		return err
-	}
-
-	err = r.ensureClient()
-	if nil != err {
-		r.Log.Errorf("Error with Client %s", err)
-		return err
-	}
-
-	return nil
 }
 
 func init() {

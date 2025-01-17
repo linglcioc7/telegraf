@@ -23,6 +23,7 @@ import (
 	_ "github.com/influxdata/telegraf/plugins/parsers/all"
 	_ "github.com/influxdata/telegraf/plugins/processors/all"
 	_ "github.com/influxdata/telegraf/plugins/secretstores/all"
+	_ "github.com/influxdata/telegraf/plugins/serializers/all"
 )
 
 type TelegrafConfig interface {
@@ -98,7 +99,15 @@ func deleteEmpty(s []string) []string {
 // runApp defines all the subcommands and flags for Telegraf
 // this abstraction is used for testing, so outputBuffer and args can be changed
 func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfig, m App) error {
-	pluginFilterFlags := []cli.Flag{
+	configHandlingFlags := []cli.Flag{
+		&cli.StringSliceFlag{
+			Name:  "config",
+			Usage: "configuration file to load",
+		},
+		&cli.StringSliceFlag{
+			Name:  "config-directory",
+			Usage: "directory containing additional *.conf files",
+		},
 		&cli.StringFlag{
 			Name: "section-filter",
 			Usage: "filter the sections to print, separator is ':'. " +
@@ -126,7 +135,7 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 		},
 	}
 
-	extraFlags := append(pluginFilterFlags, cliFlags()...)
+	mainFlags := append(configHandlingFlags, cliFlags()...)
 
 	// This function is used when Telegraf is run with only flags
 	action := func(cCtx *cli.Context) error {
@@ -134,11 +143,6 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 		// a command...
 		if cCtx.NArg() > 0 {
 			return fmt.Errorf("unknown command %q", cCtx.Args().First())
-		}
-
-		err := logger.SetupLogging(logger.LogConfig{})
-		if err != nil {
-			return err
 		}
 
 		// Deprecated: Use execd instead
@@ -169,6 +173,7 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 			return nil
 		// print available output plugins
 		case cCtx.Bool("output-list"):
+			outputBuffer.Write([]byte("DEPRECATED: use telegraf plugins outputs\n"))
 			outputBuffer.Write([]byte("Available Output Plugins:\n"))
 			names := make([]string, 0, len(outputs.Outputs))
 			for k := range outputs.Outputs {
@@ -176,11 +181,12 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 			}
 			sort.Strings(names)
 			for _, k := range names {
-				outputBuffer.Write([]byte(fmt.Sprintf("  %s\n", k)))
+				fmt.Fprintf(outputBuffer, "  %s\n", k)
 			}
 			return nil
 		// print available input plugins
 		case cCtx.Bool("input-list"):
+			outputBuffer.Write([]byte("DEPRECATED: use telegraf plugins inputs\n"))
 			outputBuffer.Write([]byte("Available Input Plugins:\n"))
 			names := make([]string, 0, len(inputs.Inputs))
 			for k := range inputs.Inputs {
@@ -188,7 +194,7 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 			}
 			sort.Strings(names)
 			for _, k := range names {
-				outputBuffer.Write([]byte(fmt.Sprintf("  %s\n", k)))
+				fmt.Fprintf(outputBuffer, "  %s\n", k)
 			}
 			return nil
 		// print usage for a plugin, ie, 'telegraf --usage mysql'
@@ -201,7 +207,7 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 			return nil
 		// DEPRECATED
 		case cCtx.Bool("version"):
-			outputBuffer.Write([]byte(fmt.Sprintf("%s\n", internal.FormatFullVersion())))
+			fmt.Fprintf(outputBuffer, "%s\n", internal.FormatFullVersion())
 			return nil
 		// DEPRECATED
 		case cCtx.Bool("sample-config"):
@@ -218,16 +224,22 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 		filters := processFilterFlags(cCtx)
 
 		g := GlobalFlags{
-			config:      cCtx.StringSlice("config"),
-			configDir:   cCtx.StringSlice("config-directory"),
-			testWait:    cCtx.Int("test-wait"),
-			watchConfig: cCtx.String("watch-config"),
-			pidFile:     cCtx.String("pidfile"),
-			plugindDir:  cCtx.String("plugin-directory"),
-			test:        cCtx.Bool("test"),
-			debug:       cCtx.Bool("debug"),
-			once:        cCtx.Bool("once"),
-			quiet:       cCtx.Bool("quiet"),
+			config:                 cCtx.StringSlice("config"),
+			configDir:              cCtx.StringSlice("config-directory"),
+			testWait:               cCtx.Int("test-wait"),
+			configURLRetryAttempts: cCtx.Int("config-url-retry-attempts"),
+			configURLWatchInterval: cCtx.Duration("config-url-watch-interval"),
+			watchConfig:            cCtx.String("watch-config"),
+			watchInterval:          cCtx.Duration("watch-interval"),
+			pidFile:                cCtx.String("pidfile"),
+			plugindDir:             cCtx.String("plugin-directory"),
+			password:               cCtx.String("password"),
+			oldEnvBehavior:         cCtx.Bool("old-env-behavior"),
+			test:                   cCtx.Bool("test"),
+			debug:                  cCtx.Bool("debug"),
+			once:                   cCtx.Bool("once"),
+			quiet:                  cCtx.Bool("quiet"),
+			unprotected:            cCtx.Bool("unprotected"),
 		}
 
 		w := WindowFlags{
@@ -243,25 +255,29 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 		return m.Run()
 	}
 
+	commands := append(
+		getConfigCommands(configHandlingFlags, outputBuffer),
+		getSecretStoreCommands(m)...,
+	)
+	commands = append(commands, getPluginCommands(outputBuffer)...)
+	commands = append(commands, getServiceCommands(outputBuffer)...)
+
 	app := &cli.App{
 		Name:   "Telegraf",
 		Usage:  "The plugin-driven server agent for collecting & reporting metrics.",
 		Writer: outputBuffer,
 		Flags: append(
 			[]cli.Flag{
-				// String slice flags
-				&cli.StringSliceFlag{
-					Name:  "config",
-					Usage: "configuration file to load",
-				},
-				&cli.StringSliceFlag{
-					Name:  "config-directory",
-					Usage: "directory containing additional *.conf files",
-				},
 				// Int flags
 				&cli.IntFlag{
 					Name:  "test-wait",
 					Usage: "wait up to this many seconds for service inputs to complete in test mode",
+				},
+				&cli.IntFlag{
+					Name: "config-url-retry-attempts",
+					Usage: "Number of attempts to obtain a remote configuration via a URL during startup. " +
+						"Set to -1 for unlimited attempts.",
+					DefaultText: "3",
 				},
 				//
 				// String flags
@@ -274,15 +290,24 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 					Usage: "pprof host/IP and port to listen on (e.g. 'localhost:6060')",
 				},
 				&cli.StringFlag{
-					Name:  "watch-config",
-					Usage: "monitoring config changes [notify, poll]",
+					Name: "watch-config",
+					Usage: "monitoring config changes [notify, poll] of --config and --config-directory options. " +
+						"Notify supports linux, *bsd, and macOS. Poll is required for Windows and checks every 250ms.",
 				},
 				&cli.StringFlag{
 					Name:  "pidfile",
 					Usage: "file to write our pid to",
 				},
+				&cli.StringFlag{
+					Name:  "password",
+					Usage: "password to unlock secret-stores",
+				},
 				//
 				// Bool flags
+				&cli.BoolFlag{
+					Name:  "old-env-behavior",
+					Usage: "switch back to pre v1.27 environment replacement behavior",
+				},
 				&cli.BoolFlag{
 					Name:  "once",
 					Usage: "run one gather and exit",
@@ -296,9 +321,26 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 					Usage: "run in quiet mode",
 				},
 				&cli.BoolFlag{
+					Name:  "unprotected",
+					Usage: "do not protect secrets in memory",
+				},
+				&cli.BoolFlag{
 					Name: "test",
 					Usage: "enable test mode: gather metrics, print them out, and exit. " +
 						"Note: Test mode only runs inputs, not processors, aggregators, or outputs",
+				},
+				//
+				// Duration flags
+				&cli.DurationFlag{
+					Name: "watch-interval",
+					Usage: "Time duration to check for updates to config files specified by --config and " +
+						"--config-directory options. Use with '--watch-config poll'",
+					DefaultText: "disabled",
+				},
+				&cli.DurationFlag{
+					Name:        "config-url-watch-interval",
+					Usage:       "Time duration to check for updates to URL based configuration files",
+					DefaultText: "disabled",
 				},
 				// TODO: Change "deprecation-list, input-list, output-list" flags to become a subcommand "list" that takes
 				// "input,output,aggregator,processor, deprecated" as parameters
@@ -332,47 +374,39 @@ func runApp(args []string, outputBuffer io.Writer, pprof Server, c TelegrafConfi
 					Usage: "DEPRECATED: path to directory containing external plugins",
 				},
 				// !!!
-			}, extraFlags...),
+			}, mainFlags...),
 		Action: action,
 		Commands: append([]*cli.Command{
 			{
-				Name:  "config",
-				Usage: "print out full sample configuration to stdout",
-				Flags: pluginFilterFlags,
-				Action: func(cCtx *cli.Context) error {
-					// The sub_Filters are populated when the filter flags are set after the subcommand config
-					// e.g. telegraf config --section-filter inputs
-					filters := processFilterFlags(cCtx)
-
-					printSampleConfig(outputBuffer, filters)
-					return nil
-				},
-			},
-			{
 				Name:  "version",
 				Usage: "print current version to stdout",
-				Action: func(cCtx *cli.Context) error {
-					outputBuffer.Write([]byte(fmt.Sprintf("%s\n", internal.FormatFullVersion())))
+				Action: func(*cli.Context) error {
+					fmt.Fprintf(outputBuffer, "%s\n", internal.FormatFullVersion())
 					return nil
 				},
 			},
-		},
-			getSecretStoreCommands(m)...,
-		),
+		}, commands...),
 	}
 
 	// Make sure we safely erase secrets
 	defer memguard.Purge()
+	defer logger.CloseLogging()
 
-	return app.Run(args)
+	if err := app.Run(args); err != nil {
+		log.Printf("E! %s", err)
+		return err
+	}
+	return nil
 }
 
 func main() {
+	// #13481: disables gh:99designs/keyring kwallet.go from connecting to dbus
+	os.Setenv("DISABLE_KWALLET", "1")
+
 	agent := Telegraf{}
 	pprof := NewPprofServer()
 	c := config.NewConfig()
-	err := runApp(os.Args, os.Stdout, pprof, c, &agent)
-	if err != nil {
-		log.Fatalf("E! %s", err)
+	if err := runApp(os.Args, os.Stdout, pprof, c, &agent); err != nil {
+		os.Exit(1)
 	}
 }

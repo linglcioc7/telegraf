@@ -9,11 +9,11 @@ import (
 
 type xmlDocument struct{}
 
-func (d *xmlDocument) Parse(buf []byte) (dataNode, error) {
+func (*xmlDocument) Parse(buf []byte) (dataNode, error) {
 	return xmlquery.Parse(strings.NewReader(string(buf)))
 }
 
-func (d *xmlDocument) QueryAll(node dataNode, expr string) ([]dataNode, error) {
+func (*xmlDocument) QueryAll(node dataNode, expr string) ([]dataNode, error) {
 	// If this panics it's a programming error as we changed the document type while processing
 	native, err := xmlquery.QueryAll(node.(*xmlquery.Node), expr)
 	if err != nil {
@@ -27,7 +27,7 @@ func (d *xmlDocument) QueryAll(node dataNode, expr string) ([]dataNode, error) {
 	return nodes, nil
 }
 
-func (d *xmlDocument) CreateXPathNavigator(node dataNode) path.NodeNavigator {
+func (*xmlDocument) CreateXPathNavigator(node dataNode) path.NodeNavigator {
 	// If this panics it's a programming error as we changed the document type while processing
 	return xmlquery.CreateXPathNavigator(node.(*xmlquery.Node))
 }
@@ -42,7 +42,8 @@ func (d *xmlDocument) GetNodePath(node, relativeTo dataNode, sep string) string 
 	// Climb up the tree and collect the node names
 	n := nativeNode.Parent
 	for n != nil && n != nativeRelativeTo {
-		names = append(names, n.Data)
+		nodeName := d.GetNodeName(n, sep, false)
+		names = append(names, nodeName)
 		n = n.Parent
 	}
 
@@ -59,7 +60,14 @@ func (d *xmlDocument) GetNodePath(node, relativeTo dataNode, sep string) string 
 	return nodepath[:len(nodepath)-1]
 }
 
-func (d *xmlDocument) OutputXML(node dataNode) string {
+func (*xmlDocument) GetNodeName(node dataNode, _ string, _ bool) string {
+	// If this panics it's a programming error as we changed the document type while processing
+	nativeNode := node.(*xmlquery.Node)
+
+	return nativeNode.Data
+}
+
+func (*xmlDocument) OutputXML(node dataNode) string {
 	native := node.(*xmlquery.Node)
 	return native.OutputXML(false)
 }

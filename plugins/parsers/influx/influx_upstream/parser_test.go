@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/testutil"
 )
@@ -659,7 +660,7 @@ func TestStreamParser(t *testing.T) {
 			for {
 				m, err := parser.Next()
 				if err != nil {
-					if errors.Is(err, ErrEOF) {
+					if errors.Is(err, io.EOF) {
 						break
 					}
 					require.Equal(t, tt.err.Error(), err.Error())
@@ -682,9 +683,8 @@ func TestSeriesParser(t *testing.T) {
 		err      error
 	}{
 		{
-			name:    "empty",
-			input:   []byte(""),
-			metrics: []telegraf.Metric{},
+			name:  "empty",
+			input: []byte(""),
 		},
 		{
 			name:  "minimal",
@@ -714,9 +714,8 @@ func TestSeriesParser(t *testing.T) {
 			},
 		},
 		{
-			name:    "missing tag value",
-			input:   []byte("cpu,a="),
-			metrics: []telegraf.Metric{},
+			name:  "missing tag value",
+			input: []byte("cpu,a="),
 			err: &ParseError{
 				DecodeError: &lineprotocol.DecodeError{
 					Line:   1,
@@ -727,9 +726,8 @@ func TestSeriesParser(t *testing.T) {
 			},
 		},
 		{
-			name:    "error with carriage return in long line",
-			input:   []byte("cpu,a=" + strings.Repeat("x", maxErrorBufferSize) + "\rcd,b"),
-			metrics: []telegraf.Metric{},
+			name:  "error with carriage return in long line",
+			input: []byte("cpu,a=" + strings.Repeat("x", maxErrorBufferSize) + "\rcd,b"),
 			err: &ParseError{
 				DecodeError: &lineprotocol.DecodeError{
 					Line:   1,
@@ -762,6 +760,114 @@ func TestSeriesParser(t *testing.T) {
 				require.Equal(t, expected.Tags(), metrics[i].Tags())
 			}
 		})
+	}
+}
+
+func TestParserTimestampPrecision(t *testing.T) {
+	var tests = []struct {
+		name      string
+		precision string
+		input     []byte
+		metrics   []telegraf.Metric
+		err       error
+	}{
+		{
+			name:      "default - nanosecond",
+			precision: "",
+			input:     []byte("cpu value=1 1234567890123123123"),
+			metrics: []telegraf.Metric{
+				metric.New(
+					"cpu",
+					map[string]string{},
+					map[string]any{
+						"value": float64(1),
+					},
+					time.Unix(0, 1234567890123123123),
+				),
+			},
+		},
+		{
+			name:      "nanosecond",
+			precision: "1ns",
+			input:     []byte("cpu value=2 1234567890123123999"),
+			metrics: []telegraf.Metric{
+				metric.New(
+					"cpu",
+					map[string]string{},
+					map[string]any{
+						"value": float64(2),
+					},
+					time.Unix(0, 1234567890123123999),
+				),
+			},
+		},
+		{
+			name:      "microsecond",
+			precision: "1us",
+			input:     []byte("cpu value=3 1234567890123123"),
+			metrics: []telegraf.Metric{
+				metric.New(
+					"cpu",
+					map[string]string{},
+					map[string]any{
+						"value": float64(3),
+					},
+					time.Unix(0, 1234567890123123000),
+				),
+			},
+		},
+		{
+			name:      "millisecond",
+			precision: "1ms",
+			input:     []byte("cpu value=4 1234567890123"),
+			metrics: []telegraf.Metric{
+				metric.New(
+					"cpu",
+					map[string]string{},
+					map[string]any{
+						"value": float64(4),
+					},
+					time.Unix(0, 1234567890123000000),
+				),
+			},
+		},
+		{
+			name:      "second",
+			precision: "1s",
+			input:     []byte("cpu value=5 1234567890"),
+			metrics: []telegraf.Metric{
+				metric.New(
+					"cpu",
+					map[string]string{},
+					map[string]any{
+						"value": float64(5),
+					},
+					time.Unix(0, 1234567890000000000),
+				),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := config.Duration(0)
+			require.NoError(t, d.UnmarshalText([]byte(tt.precision)))
+			parser := Parser{InfluxTimestampPrecision: d}
+			require.NoError(t, parser.Init())
+
+			metrics, err := parser.Parse(tt.input)
+			require.NoError(t, err)
+
+			require.Equal(t, tt.metrics, metrics)
+		})
+	}
+}
+
+func TestParserInvalidTimestampPrecision(t *testing.T) {
+	d := config.Duration(0)
+	for _, precision := range []string{"1h", "1d", "2s", "1m", "2ns"} {
+		require.NoError(t, d.UnmarshalText([]byte(precision)))
+		parser := Parser{InfluxTimestampPrecision: d}
+		require.ErrorContains(t, parser.Init(), "invalid time precision")
 	}
 }
 
@@ -849,7 +955,7 @@ func TestStreamParserErrorString(t *testing.T) {
 			var errs []error
 			for i := 0; i < 20; i++ {
 				_, err := parser.Next()
-				if errors.Is(err, ErrEOF) {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 
@@ -867,11 +973,11 @@ func TestStreamParserErrorString(t *testing.T) {
 }
 
 type MockReader struct {
-	ReadF func(p []byte) (int, error)
+	ReadF func() (int, error)
 }
 
-func (r *MockReader) Read(p []byte) (int, error) {
-	return r.ReadF(p)
+func (r *MockReader) Read([]byte) (int, error) {
+	return r.ReadF()
 }
 
 // Errors from the Reader are returned from the Parser
@@ -879,7 +985,7 @@ func TestStreamParserReaderError(t *testing.T) {
 	readerErr := errors.New("error but not eof")
 
 	parser := NewStreamParser(&MockReader{
-		ReadF: func(p []byte) (int, error) {
+		ReadF: func() (int, error) {
 			return 0, readerErr
 		},
 	})
@@ -888,7 +994,7 @@ func TestStreamParserReaderError(t *testing.T) {
 	require.Equal(t, err, readerErr)
 
 	_, err = parser.Next()
-	require.Equal(t, err, ErrEOF)
+	require.Equal(t, err, io.EOF)
 }
 
 func TestStreamParserProducesAllAvailableMetrics(t *testing.T) {
@@ -897,9 +1003,11 @@ func TestStreamParserProducesAllAvailableMetrics(t *testing.T) {
 	parser := NewStreamParser(r)
 	parser.SetTimeFunc(DefaultTime)
 
+	ch := make(chan error)
 	go func() {
 		_, err := w.Write([]byte("metric value=1\nmetric2 value=1\n"))
-		require.NoError(t, err)
+		ch <- err
+		close(ch)
 	}()
 
 	_, err := parser.Next()
@@ -908,4 +1016,58 @@ func TestStreamParserProducesAllAvailableMetrics(t *testing.T) {
 	// should not block on second read
 	_, err = parser.Next()
 	require.NoError(t, err)
+
+	err = <-ch
+	require.NoError(t, err)
+}
+
+const benchmarkData = `benchmark,tags_host=myhost,tags_platform=python,tags_sdkver=3.11.5 value=5 1653643421
+benchmark,tags_host=myhost,tags_platform=python,tags_sdkver=3.11.4 value=4 1653643422
+`
+
+func TestBenchmarkData(t *testing.T) {
+	plugin := &Parser{}
+	require.NoError(t, plugin.Init())
+
+	expected := []telegraf.Metric{
+		metric.New(
+			"benchmark",
+			map[string]string{
+				"tags_host":     "myhost",
+				"tags_platform": "python",
+				"tags_sdkver":   "3.11.5",
+			},
+			map[string]interface{}{
+				"value": float64(5),
+			},
+			time.Unix(1653643422, 0),
+		),
+		metric.New(
+			"benchmark",
+			map[string]string{
+				"tags_host":     "myhost",
+				"tags_platform": "python",
+				"tags_sdkver":   "3.11.4",
+			},
+			map[string]interface{}{
+				"value": float64(4),
+			},
+			time.Unix(1653643422, 0),
+		),
+	}
+
+	// Do the parsing
+	actual, err := plugin.Parse([]byte(benchmarkData))
+	require.NoError(t, err)
+	testutil.RequireMetricsEqual(t, expected, actual, testutil.IgnoreTime(), testutil.SortMetrics())
+}
+
+func BenchmarkParsing(b *testing.B) {
+	plugin := &Parser{}
+	require.NoError(b, plugin.Init())
+
+	for n := 0; n < b.N; n++ {
+		//nolint:errcheck // Benchmarking so skip the error check to avoid the unnecessary operations
+		plugin.Parse([]byte(benchmarkData))
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal"
 	"github.com/influxdata/telegraf/plugins/outputs"
-	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
 //go:embed sample.conf
@@ -35,6 +35,7 @@ type PubSub struct {
 	PublishNumGoroutines  int             `toml:"publish_num_go_routines"`
 	PublishTimeout        config.Duration `toml:"publish_timeout"`
 	Base64Data            bool            `toml:"base64_data"`
+	ContentEncoding       string          `toml:"content_encoding"`
 
 	Log telegraf.Logger `toml:"-"`
 
@@ -43,30 +44,24 @@ type PubSub struct {
 
 	stubTopic func(id string) topic
 
-	serializer     serializers.Serializer
+	serializer     telegraf.Serializer
 	publishResults []publishResult
+	encoder        internal.ContentEncoder
 }
 
 func (*PubSub) SampleConfig() string {
 	return sampleConfig
 }
 
-func (ps *PubSub) SetSerializer(serializer serializers.Serializer) {
+func (ps *PubSub) SetSerializer(serializer telegraf.Serializer) {
 	ps.serializer = serializer
 }
 
 func (ps *PubSub) Connect() error {
-	if ps.Topic == "" {
-		return fmt.Errorf(`"topic" is required`)
-	}
-
-	if ps.Project == "" {
-		return fmt.Errorf(`"project" is required`)
-	}
-
 	if ps.stubTopic == nil {
 		return ps.initPubSubClient()
 	}
+
 	return nil
 }
 
@@ -168,9 +163,11 @@ func (ps *PubSub) toMessages(metrics []telegraf.Metric) ([]*pubsub.Message, erro
 			return nil, err
 		}
 
-		if ps.Base64Data {
-			encoded := base64.StdEncoding.EncodeToString(b)
-			b = []byte(encoded)
+		b = ps.encodeB64Data(b)
+
+		b, err = ps.compressData(b)
+		if err != nil {
+			return nil, fmt.Errorf("unable to compress message with %s: %w", ps.ContentEncoding, err)
 		}
 
 		msg := &pubsub.Message{Data: b}
@@ -188,9 +185,12 @@ func (ps *PubSub) toMessages(metrics []telegraf.Metric) ([]*pubsub.Message, erro
 			continue
 		}
 
-		if ps.Base64Data {
-			encoded := base64.StdEncoding.EncodeToString(b)
-			b = []byte(encoded)
+		b = ps.encodeB64Data(b)
+
+		b, err = ps.compressData(b)
+		if err != nil {
+			ps.Log.Errorf("Unable to compress message with %s: %v", ps.ContentEncoding, err)
+			continue
 		}
 
 		msg := &pubsub.Message{
@@ -203,6 +203,32 @@ func (ps *PubSub) toMessages(metrics []telegraf.Metric) ([]*pubsub.Message, erro
 	}
 
 	return msgs, nil
+}
+
+func (ps *PubSub) encodeB64Data(data []byte) []byte {
+	if ps.Base64Data {
+		encoded := base64.StdEncoding.EncodeToString(data)
+		data = []byte(encoded)
+	}
+
+	return data
+}
+
+func (ps *PubSub) compressData(data []byte) ([]byte, error) {
+	if ps.ContentEncoding == "identity" {
+		return data, nil
+	}
+
+	data, err := ps.encoder.Encode(data)
+	if err != nil {
+		return nil, err
+	}
+
+	compressedData := make([]byte, len(data))
+	copy(compressedData, data)
+	data = compressedData
+
+	return data, nil
 }
 
 func (ps *PubSub) waitForResults(ctx context.Context, cancel context.CancelFunc) error {
@@ -228,6 +254,31 @@ func (ps *PubSub) waitForResults(ctx context.Context, cancel context.CancelFunc)
 
 	wg.Wait()
 	return pErr
+}
+
+func (ps *PubSub) Init() error {
+	if ps.Topic == "" {
+		return errors.New(`"topic" is required`)
+	}
+
+	if ps.Project == "" {
+		return errors.New(`"project" is required`)
+	}
+
+	switch ps.ContentEncoding {
+	case "", "identity":
+		ps.ContentEncoding = "identity"
+	case "gzip":
+		var err error
+		ps.encoder, err = internal.NewContentEncoder(ps.ContentEncoding)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("invalid value %q for content_encoding", ps.ContentEncoding)
+	}
+
+	return nil
 }
 
 func init() {

@@ -65,9 +65,9 @@ func (f *Finder) Find(ctx context.Context, resType, path string, dst interface{}
 
 func (f *Finder) findResources(ctx context.Context, resType, path string, objs map[string]types.ObjectContent) error {
 	p := strings.Split(path, "/")
-	flt := make([]property.Filter, len(p)-1)
+	flt := make([]property.Match, len(p)-1)
 	for i := 1; i < len(p); i++ {
-		flt[i-1] = property.Filter{"name": p[i]}
+		flt[i-1] = property.Match{"name": p[i]}
 	}
 	err := f.descend(ctx, f.client.Client.ServiceContent.RootFolder, resType, flt, 0, objs)
 	if err != nil {
@@ -78,7 +78,7 @@ func (f *Finder) findResources(ctx context.Context, resType, path string, objs m
 }
 
 func (f *Finder) descend(ctx context.Context, root types.ManagedObjectReference, resType string,
-	tokens []property.Filter, pos int, objs map[string]types.ObjectContent) error {
+	tokens []property.Match, pos int, objs map[string]types.ObjectContent) error {
 	isLeaf := pos == len(tokens)-1
 
 	// No more tokens to match?
@@ -155,22 +155,20 @@ func (f *Finder) descend(ctx context.Context, root types.ManagedObjectReference,
 		var inc int
 		if recurse {
 			inc = 0 // By default, we stay on this token
-			if !isLeaf {
-				// Lookahead to next token.
-				if matchName(tokens[pos+1], c.PropSet) {
-					// Are we looking ahead at a leaf node that has the wanted type?
-					// Rerun the entire level as a leaf. This is needed since all properties aren't loaded
-					// when we're processing non-leaf nodes.
-					if pos == len(tokens)-2 {
-						if c.Obj.Type == resType {
-							rerunAsLeaf = true
-							continue
-						}
-					} else if _, ok := containers[c.Obj.Type]; ok {
-						// Tokens match and we're looking ahead at a container type that's not a leaf
-						// Consume this token and the next.
-						inc = 2
+			// Lookahead to next token.
+			if matchName(tokens[pos+1], c.PropSet) {
+				// Are we looking ahead at a leaf node that has the wanted type?
+				// Rerun the entire level as a leaf. This is needed since all properties aren't loaded
+				// when we're processing non-leaf nodes.
+				if pos == len(tokens)-2 {
+					if c.Obj.Type == resType {
+						rerunAsLeaf = true
+						continue
 					}
+				} else if _, ok := containers[c.Obj.Type]; ok {
+					// Tokens match and we're looking ahead at a container type that's not a leaf
+					// Consume this token and the next.
+					inc = 2
 				}
 			}
 		} else {
@@ -230,10 +228,10 @@ func (r *ResourceFilter) FindAll(ctx context.Context, dst interface{}) error {
 	return r.finder.FindAll(ctx, r.resType, r.paths, r.excludePaths, dst)
 }
 
-func matchName(f property.Filter, props []types.DynamicProperty) bool {
+func matchName(f property.Match, props []types.DynamicProperty) bool {
 	for _, prop := range props {
 		if prop.Name == "name" {
-			return f.MatchProperty(prop)
+			return f.Property(prop)
 		}
 	}
 	return false
@@ -260,10 +258,12 @@ func init() {
 		"HostSystem":   {"parent", "summary.customValue", "customValue"},
 		"ResourcePool": {"parent", "customValue"},
 		"VirtualMachine": {"runtime.host", "config.guestId", "config.uuid", "runtime.powerState",
-			"summary.customValue", "guest.net", "guest.hostName", "resourcePool", "customValue"},
+			"summary.customValue", "summary.config.memorySizeMB", "guest.guestId", "guest.net", "guest.hostName",
+			"resourcePool", "customValue"},
 		"Datastore":              {"parent", "info", "customValue"},
 		"ClusterComputeResource": {"parent", "customValue"},
 		"Datacenter":             {"parent", "customValue"},
+		"HostNumericSensorInfo":  {"parent", "temperature", "baseUnits"},
 	}
 
 	containers = map[string]interface{}{

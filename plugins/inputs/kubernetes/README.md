@@ -6,21 +6,27 @@ is running as part of a `daemonset` within a kubernetes installation. This
 means that telegraf is running on every node within the cluster. Therefore, you
 should configure this plugin to talk to its locally running kubelet.
 
+Kubernetes is a fast moving project, with a new minor release every 3 months. As
+such, this plugin aims to maintain support only for versions that are supported
+by the major cloud providers, namely, 4 release over 2 years.
+
+## Host IP
+
 To find the ip address of the host you are running on you can issue a command
 like the following:
 
 ```sh
-curl -s $API_URL/api/v1/namespaces/$POD_NAMESPACE/pods/$HOSTNAME --header "Authorization: Bearer $TOKEN" --insecure | jq -r '.status.hostIP'
+curl -s $API_URL/api/v1/namespaces/$POD_NAMESPACE/pods/$HOSTNAME \
+  --header "Authorization: Bearer $TOKEN" \
+  --insecure | jq -r '.status.hostIP'
 ```
 
-In this case we used the downward API to pass in the `$POD_NAMESPACE` and
+This example uses the downward API to pass in the `$POD_NAMESPACE` and
 `$HOSTNAME` is the hostname of the pod which is set by the kubernetes API.
+See the [Kubernetes docs][] for a full example of generating a bearer token to
+explore the Kubernetes API.
 
-Kubernetes is a fast moving project, with a new minor release every 3 months. As
-such, we will aim to maintain support only for versions that are supported by
-the major cloud providers; this is roughly 4 release / 2 years.
-
-**This plugin supports Kubernetes 1.11 and later.**
+[Kubernetes docs]: https://kubernetes.io/docs/tasks/administer-cluster/access-cluster-api/#without-kubectl-proxy
 
 ## Series Cardinality Warning
 
@@ -61,6 +67,12 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   # bearer_token = "/var/run/secrets/kubernetes.io/serviceaccount/token"
   ## OR
   # bearer_token_string = "abc_123"
+
+  ## Kubernetes Node Metric Name
+  ## The default Kubernetes node metric name (i.e. kubernetes_node) is the same
+  ## for the kubernetes and kube_inventory plugins. To avoid conflicts, set this
+  ## option to a different value.
+  # node_metric_name = "kubernetes_node"
 
   ## Pod labels to be added as tags.  An empty array for both include and
   ## exclude will include all labels.
@@ -158,7 +170,7 @@ Kubernetes Architecture][k8s-telegraf] or view the Helm charts:
 
 ## Example Output
 
-```shell
+```text
 kubernetes_node
 kubernetes_pod_container,container_name=deis-controller,namespace=deis,node_name=ip-10-0-0-0.ec2.internal,pod_name=deis-controller-3058870187-xazsr cpu_usage_core_nanoseconds=2432835i,cpu_usage_nanocores=0i,logsfs_available_bytes=121128271872i,logsfs_capacity_bytes=153567944704i,logsfs_used_bytes=20787200i,memory_major_page_faults=0i,memory_page_faults=175i,memory_rss_bytes=0i,memory_usage_bytes=0i,memory_working_set_bytes=0i,rootfs_available_bytes=121128271872i,rootfs_capacity_bytes=153567944704i,rootfs_used_bytes=1110016i 1476477530000000000
 kubernetes_pod_network,namespace=deis,node_name=ip-10-0-0-0.ec2.internal,pod_name=deis-controller-3058870187-xazsr rx_bytes=120671099i,rx_errors=0i,tx_bytes=102451983i,tx_errors=0i 1476477530000000000

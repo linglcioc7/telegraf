@@ -37,7 +37,7 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   # lang = "en"
 
   ## APIs to fetch; can contain "weather" or "forecast".
-  fetch = ["weather", "forecast"]
+  # fetch = ["weather", "forecast"]
 
   ## OpenWeatherMap base URL
   # base_url = "https://api.openweathermap.org/"
@@ -49,9 +49,18 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## "metric", "imperial", or "standard".
   # units = "metric"
 
-  ## Query interval; OpenWeatherMap weather data is updated every 10
-  ## minutes.
-  interval = "10m"
+  ## Style to query the current weather; available options
+  ##   batch      -- query multiple cities at once using the "group" endpoint
+  ##   individual -- query each city individually using the "weather" endpoint
+  ## You should use "individual" here as it is documented and provides more
+  ## frequent updates. The default is "batch" for backward compatibility.
+  # query_style = "batch"
+
+  ## Query interval to fetch data.
+  ## By default the global 'interval' setting is used. You should override the
+  ## interval here if the global setting is shorter than 10 minutes as
+  ## OpenWeatherMap weather data is only updated every 10 minutes.
+  # interval = "10m"
 ```
 
 ## Metrics
@@ -80,11 +89,10 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
 ## Example Output
 
-```shell
-> weather,city=San\ Francisco,city_id=5391959,condition_id=803,condition_main=Clouds,country=US,forecast=114h,host=robot pressure=1027,temperature=10.09,wind_degrees=34,wind_speed=1.24,condition_description="broken clouds",cloudiness=80i,humidity=67i,rain=0,feels_like=8.9,condition_icon="04n" 1645952400000000000
-> weather,city=San\ Francisco,city_id=5391959,condition_id=804,condition_main=Clouds,country=US,forecast=117h,host=robot humidity=65i,rain=0,temperature=10.12,wind_degrees=31,cloudiness=90i,pressure=1026,feels_like=8.88,wind_speed=1.31,condition_description="overcast clouds",condition_icon="04n" 1645963200000000000
-> weather,city=San\ Francisco,city_id=5391959,condition_id=804,condition_main=Clouds,country=US,forecast=120h,host=robot cloudiness=100i,humidity=61i,rain=0,temperature=10.28,wind_speed=1.94,condition_icon="04d",pressure=1027,feels_like=8.96,wind_degrees=16,condition_description="overcast clouds" 1645974000000000000
-
+```text
+weather,city=San\ Francisco,city_id=5391959,condition_id=803,condition_main=Clouds,country=US,forecast=114h,host=robot pressure=1027,temperature=10.09,wind_degrees=34,wind_speed=1.24,condition_description="broken clouds",cloudiness=80i,humidity=67i,rain=0,feels_like=8.9,condition_icon="04n" 1645952400000000000
+weather,city=San\ Francisco,city_id=5391959,condition_id=804,condition_main=Clouds,country=US,forecast=117h,host=robot humidity=65i,rain=0,temperature=10.12,wind_degrees=31,cloudiness=90i,pressure=1026,feels_like=8.88,wind_speed=1.31,condition_description="overcast clouds",condition_icon="04n" 1645963200000000000
+weather,city=San\ Francisco,city_id=5391959,condition_id=804,condition_main=Clouds,country=US,forecast=120h,host=robot cloudiness=100i,humidity=61i,rain=0,temperature=10.28,wind_speed=1.94,condition_icon="04d",pressure=1027,feels_like=8.96,wind_degrees=16,condition_description="overcast clouds" 1645974000000000000
 ```
 
 [api key]: https://openweathermap.org/appid

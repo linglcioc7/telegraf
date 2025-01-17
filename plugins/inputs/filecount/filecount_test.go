@@ -13,10 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestNoFilters(t *testing.T) {
@@ -38,6 +39,8 @@ func TestNoFiltersOnChildDir(t *testing.T) {
 	require.NoError(t, acc.GatherError(fc.Gather))
 	require.True(t, acc.HasPoint("filecount", tags, "count", int64(len(matches))))
 	require.True(t, acc.HasPoint("filecount", tags, "size_bytes", int64(600)))
+	require.True(t, acc.HasInt64Field("filecount", "oldest_file_timestamp"))
+	require.True(t, acc.HasInt64Field("filecount", "newest_file_timestamp"))
 }
 
 func TestNoRecursiveButSuperMeta(t *testing.T) {
@@ -52,6 +55,8 @@ func TestNoRecursiveButSuperMeta(t *testing.T) {
 
 	require.True(t, acc.HasPoint("filecount", tags, "count", int64(len(matches))))
 	require.True(t, acc.HasPoint("filecount", tags, "size_bytes", int64(200)))
+	require.True(t, acc.HasInt64Field("filecount", "oldest_file_timestamp"))
+	require.True(t, acc.HasInt64Field("filecount", "newest_file_timestamp"))
 }
 
 func TestNameFilter(t *testing.T) {
@@ -143,7 +148,7 @@ func TestDirectoryWithTrailingSlash(t *testing.T) {
 		Directories: []string{getTestdataDir() + string(filepath.Separator)},
 		Name:        "*",
 		Recursive:   true,
-		Fs:          getFakeFileSystem(getTestdataDir()),
+		fs:          getFakeFileSystem(getTestdataDir()),
 	}
 
 	var acc testutil.Accumulator
@@ -157,8 +162,10 @@ func TestDirectoryWithTrailingSlash(t *testing.T) {
 				"directory": getTestdataDir(),
 			},
 			map[string]interface{}{
-				"count":      9,
-				"size_bytes": 5096,
+				"count":                 9,
+				"size_bytes":            5096,
+				"newest_file_timestamp": time.Unix(1450117505, 0).UnixNano(),
+				"oldest_file_timestamp": time.Unix(1292351105, 0).UnixNano(),
 			},
 			time.Unix(0, 0),
 			telegraf.Gauge,
@@ -178,7 +185,7 @@ func getNoFilterFileCount() FileCount {
 		Size:        config.Size(0),
 		MTime:       config.Duration(0),
 		fileFilters: nil,
-		Fs:          getFakeFileSystem(getTestdataDir()),
+		fs:          getFakeFileSystem(getTestdataDir()),
 	}
 }
 
@@ -192,6 +199,7 @@ func getTestdataDir() string {
 	var chunks []string
 	var testDirectory string
 
+	//nolint:staticcheck // Silence linter for now as we plan to reenable tests for Windows later
 	if runtime.GOOS == "windows" {
 		chunks = strings.Split(dir, "\\")
 		testDirectory = strings.Join(chunks[:], "\\") + "\\testdata"
@@ -232,7 +240,7 @@ func getFakeFileSystem(basePath string) fakeFileSystem {
 	return fakeFileSystem{files: fileList}
 }
 
-func fileCountEquals(t *testing.T, fc FileCount, expectedCount int, expectedSize int) {
+func fileCountEquals(t *testing.T, fc FileCount, expectedCount, expectedSize int) {
 	tags := map[string]string{"directory": getTestdataDir()}
 	acc := testutil.Accumulator{}
 	require.NoError(t, acc.GatherError(fc.Gather))

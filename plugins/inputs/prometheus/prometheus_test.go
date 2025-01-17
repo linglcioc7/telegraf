@@ -7,15 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/influxdata/telegraf/config"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/fields"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/testutil"
 )
 
@@ -51,9 +52,12 @@ const sampleGaugeTextFormat = `
 go_goroutines 15 1490802350000`
 
 func TestPrometheusGeneratesMetrics(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
@@ -75,13 +79,83 @@ func TestPrometheusGeneratesMetrics(t *testing.T) {
 	require.True(t, acc.HasFloatField("test_metric", "value"))
 	require.True(t, acc.HasTimestamp("test_metric", time.Unix(1490802350, 0)))
 	require.False(t, acc.HasTag("test_metric", "address"))
-	require.True(t, acc.TagValue("test_metric", "url") == ts.URL+"/metrics")
+	require.Equal(t, ts.URL+"/metrics", acc.TagValue("test_metric", "url"))
+}
+
+func TestPrometheusCustomHeader(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("accept") {
+		case "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited;q=0.7,text/plain;version=0.0.4;q=0.3":
+			if _, err := fmt.Fprintln(w, "proto 15 1490802540000"); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				t.Error(err)
+				return
+			}
+		case "text/plain":
+			if _, err := fmt.Fprintln(w, "plain 42 1490802380000"); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				t.Error(err)
+				return
+			}
+		default:
+			if _, err := fmt.Fprintln(w, "other 44 1490802420000"); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				t.Error(err)
+				return
+			}
+		}
+	}))
+	defer ts.Close()
+
+	tests := []struct {
+		name                    string
+		headers                 map[string]string
+		expectedMeasurementName string
+	}{
+		{
+			"default",
+			map[string]string{},
+			"proto",
+		},
+		{
+			"plain text",
+			map[string]string{
+				"accept": "text/plain",
+			},
+			"plain",
+		},
+		{
+			"other",
+			map[string]string{
+				"accept": "fakeACCEPTitem",
+			},
+			"other",
+		},
+	}
+
+	for _, test := range tests {
+		p := &Prometheus{
+			Log:         testutil.Logger{},
+			URLs:        []string{ts.URL},
+			URLTag:      "url",
+			HTTPHeaders: test.headers,
+		}
+		err := p.Init()
+		require.NoError(t, err)
+
+		var acc testutil.Accumulator
+		require.NoError(t, acc.GatherError(p.Gather))
+		require.Equal(t, test.expectedMeasurementName, acc.Metrics[0].Measurement)
+	}
 }
 
 func TestPrometheusGeneratesMetricsWithHostNameTag(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
@@ -93,7 +167,8 @@ func TestPrometheusGeneratesMetricsWithHostNameTag(t *testing.T) {
 	err := p.Init()
 	require.NoError(t, err)
 
-	u, _ := url.Parse(ts.URL)
+	u, err := url.Parse(ts.URL)
+	require.NoError(t, err)
 	tsAddress := u.Hostname()
 
 	var acc testutil.Accumulator
@@ -105,8 +180,46 @@ func TestPrometheusGeneratesMetricsWithHostNameTag(t *testing.T) {
 	require.True(t, acc.HasFloatField("go_goroutines", "gauge"))
 	require.True(t, acc.HasFloatField("test_metric", "value"))
 	require.True(t, acc.HasTimestamp("test_metric", time.Unix(1490802350, 0)))
-	require.True(t, acc.TagValue("test_metric", "address") == tsAddress)
-	require.True(t, acc.TagValue("test_metric", "url") == ts.URL)
+	require.Equal(t, tsAddress, acc.TagValue("test_metric", "address"))
+	require.Equal(t, ts.URL, acc.TagValue("test_metric", "url"))
+}
+
+func TestPrometheusWithTimestamp(t *testing.T) {
+	prommetric := `# HELP test_counter A sample test counter.
+# TYPE test_counter counter
+test_counter{label="test"} 1 1685443805885`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, prommetric); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:                testutil.Logger{},
+		KubernetesServices: []string{ts.URL},
+	}
+	require.NoError(t, p.Init())
+
+	u, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	tsAddress := u.Hostname()
+
+	expected := []telegraf.Metric{
+		metric.New(
+			"test_counter",
+			map[string]string{"address": tsAddress, "label": "test"},
+			map[string]interface{}{"counter": float64(1.0)},
+			time.UnixMilli(1685443805885),
+			telegraf.Counter,
+		),
+	}
+
+	var acc testutil.Accumulator
+	require.NoError(t, acc.GatherError(p.Gather))
+	testutil.RequireMetricsSubset(t, expected, acc.GetTelegrafMetrics())
 }
 
 func TestPrometheusGeneratesMetricsAlthoughFirstDNSFailsIntegration(t *testing.T) {
@@ -114,9 +227,12 @@ func TestPrometheusGeneratesMetricsAlthoughFirstDNSFailsIntegration(t *testing.T
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
@@ -140,18 +256,23 @@ func TestPrometheusGeneratesMetricsAlthoughFirstDNSFailsIntegration(t *testing.T
 }
 
 func TestPrometheusGeneratesMetricsSlowEndpoint(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(4 * time.Second)
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
-		Log:             testutil.Logger{},
-		URLs:            []string{ts.URL},
-		URLTag:          "url",
-		ResponseTimeout: config.Duration(time.Second * 5),
+		Log:    testutil.Logger{},
+		URLs:   []string{ts.URL},
+		URLTag: "url",
+		client: &http.Client{
+			Timeout: time.Second * 5,
+		},
 	}
 	err := p.Init()
 	require.NoError(t, err)
@@ -166,22 +287,27 @@ func TestPrometheusGeneratesMetricsSlowEndpoint(t *testing.T) {
 	require.True(t, acc.HasFloatField("test_metric", "value"))
 	require.True(t, acc.HasTimestamp("test_metric", time.Unix(1490802350, 0)))
 	require.False(t, acc.HasTag("test_metric", "address"))
-	require.True(t, acc.TagValue("test_metric", "url") == ts.URL+"/metrics")
+	require.Equal(t, acc.TagValue("test_metric", "url"), ts.URL+"/metrics")
 }
 
 func TestPrometheusGeneratesMetricsSlowEndpointHitTheTimeout(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(6 * time.Second)
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
-		Log:             testutil.Logger{},
-		URLs:            []string{ts.URL},
-		URLTag:          "url",
-		ResponseTimeout: config.Duration(time.Second * 5),
+		Log:    testutil.Logger{},
+		URLs:   []string{ts.URL},
+		URLTag: "url",
+		client: &http.Client{
+			Timeout: time.Second * 5,
+		},
 	}
 	err := p.Init()
 	require.NoError(t, err)
@@ -197,21 +323,24 @@ func TestPrometheusGeneratesMetricsSlowEndpointHitTheTimeout(t *testing.T) {
 }
 
 func TestPrometheusGeneratesMetricsSlowEndpointNewConfigParameter(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(4 * time.Second)
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
-		Log:     testutil.Logger{},
-		URLs:    []string{ts.URL},
-		URLTag:  "url",
-		Timeout: config.Duration(time.Second * 5),
+		Log:    testutil.Logger{},
+		URLs:   []string{ts.URL},
+		URLTag: "url",
 	}
 	err := p.Init()
 	require.NoError(t, err)
+	p.client.Timeout = time.Second * 5
 
 	var acc testutil.Accumulator
 
@@ -223,25 +352,28 @@ func TestPrometheusGeneratesMetricsSlowEndpointNewConfigParameter(t *testing.T) 
 	require.True(t, acc.HasFloatField("test_metric", "value"))
 	require.True(t, acc.HasTimestamp("test_metric", time.Unix(1490802350, 0)))
 	require.False(t, acc.HasTag("test_metric", "address"))
-	require.True(t, acc.TagValue("test_metric", "url") == ts.URL+"/metrics")
+	require.Equal(t, acc.TagValue("test_metric", "url"), ts.URL+"/metrics")
 }
 
 func TestPrometheusGeneratesMetricsSlowEndpointHitTheTimeoutNewConfigParameter(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(6 * time.Second)
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
-		Log:     testutil.Logger{},
-		URLs:    []string{ts.URL},
-		URLTag:  "url",
-		Timeout: config.Duration(time.Second * 5),
+		Log:    testutil.Logger{},
+		URLs:   []string{ts.URL},
+		URLTag: "url",
 	}
 	err := p.Init()
 	require.NoError(t, err)
+	p.client.Timeout = time.Second * 5
 
 	var acc testutil.Accumulator
 
@@ -249,14 +381,41 @@ func TestPrometheusGeneratesMetricsSlowEndpointHitTheTimeoutNewConfigParameter(t
 	require.ErrorContains(t, err, "error making HTTP request to \""+ts.URL+"/metrics\"")
 }
 
-func TestPrometheusGeneratesSummaryMetricsV2(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, sampleSummaryTextFormat)
-		require.NoError(t, err)
+func TestPrometheusContentLengthLimit(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
+		Log:                testutil.Logger{},
+		URLs:               []string{ts.URL},
+		URLTag:             "url",
+		ContentLengthLimit: 1,
+	}
+	require.NoError(t, p.Init())
+
+	var acc testutil.Accumulator
+	require.NoError(t, acc.GatherError(p.Gather))
+	require.Empty(t, acc.Metrics)
+}
+
+func TestPrometheusGeneratesSummaryMetricsV2(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleSummaryTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:           &testutil.Logger{},
 		URLs:          []string{ts.URL},
 		URLTag:        "url",
 		MetricVersion: 2,
@@ -269,10 +428,10 @@ func TestPrometheusGeneratesSummaryMetricsV2(t *testing.T) {
 	err = acc.GatherError(p.Gather)
 	require.NoError(t, err)
 
-	require.True(t, acc.TagSetValue("prometheus", "quantile") == "0")
+	require.Equal(t, "0", acc.TagSetValue("prometheus", "quantile"))
 	require.True(t, acc.HasFloatField("prometheus", "go_gc_duration_seconds_sum"))
 	require.True(t, acc.HasFloatField("prometheus", "go_gc_duration_seconds_count"))
-	require.True(t, acc.TagValue("prometheus", "url") == ts.URL+"/metrics")
+	require.Equal(t, acc.TagValue("prometheus", "url"), ts.URL+"/metrics")
 }
 
 func TestSummaryMayContainNaN(t *testing.T) {
@@ -283,16 +442,21 @@ go_gc_duration_seconds{quantile="1"} NaN
 go_gc_duration_seconds_sum 42.0
 go_gc_duration_seconds_count 42`
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, data)
-		require.NoError(t, err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, data); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
-		URLs:          []string{ts.URL},
-		URLTag:        "",
-		MetricVersion: 2,
+		Log:                  &testutil.Logger{},
+		URLs:                 []string{ts.URL},
+		URLTag:               "",
+		MetricVersion:        2,
+		EnableRequestMetrics: true,
 	}
 	err := p.Init()
 	require.NoError(t, err)
@@ -329,26 +493,38 @@ go_gc_duration_seconds_count 42`
 			"prometheus",
 			map[string]string{},
 			map[string]interface{}{
-				"go_gc_duration_seconds_sum":   42.0,
-				"go_gc_duration_seconds_count": 42.0,
-			},
+				"go_gc_duration_seconds_sum":   float64(42.0),
+				"go_gc_duration_seconds_count": float64(42)},
 			time.Unix(0, 0),
 			telegraf.Summary,
+		),
+		testutil.MustMetric(
+			"prometheus_request",
+			map[string]string{},
+			map[string]interface{}{
+				"content_length": int64(1),
+				"response_time":  float64(0)},
+			time.Unix(0, 0),
+			telegraf.Untyped,
 		),
 	}
 
 	testutil.RequireMetricsEqual(t, expected, acc.GetTelegrafMetrics(),
-		testutil.IgnoreTime(), testutil.SortMetrics())
+		testutil.IgnoreTime(), testutil.SortMetrics(), testutil.IgnoreFields("content_length", "response_time"))
 }
 
 func TestPrometheusGeneratesGaugeMetricsV2(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, sampleGaugeTextFormat)
-		require.NoError(t, err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleGaugeTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
 	p := &Prometheus{
+		Log:           &testutil.Logger{},
 		URLs:          []string{ts.URL},
 		URLTag:        "url",
 		MetricVersion: 2,
@@ -362,14 +538,17 @@ func TestPrometheusGeneratesGaugeMetricsV2(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, acc.HasFloatField("prometheus", "go_goroutines"))
-	require.True(t, acc.TagValue("prometheus", "url") == ts.URL+"/metrics")
+	require.Equal(t, acc.TagValue("prometheus", "url"), ts.URL+"/metrics")
 	require.True(t, acc.HasTimestamp("prometheus", time.Unix(1490802350, 0)))
 }
 
 func TestPrometheusGeneratesMetricsWithIgnoreTimestamp(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, sampleTextFormat)
-		require.NoError(t, err)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, sampleTextFormat); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
 	}))
 	defer ts.Close()
 
@@ -379,15 +558,14 @@ func TestPrometheusGeneratesMetricsWithIgnoreTimestamp(t *testing.T) {
 		URLTag:          "url",
 		IgnoreTimestamp: true,
 	}
-	err := p.Init()
-	require.NoError(t, err)
+	require.NoError(t, p.Init())
 
 	var acc testutil.Accumulator
+	require.NoError(t, acc.GatherError(p.Gather))
 
-	err = acc.GatherError(p.Gather)
-	require.NoError(t, err)
-
-	m, _ := acc.Get("test_metric")
+	m, found := acc.Get("test_metric")
+	require.True(t, found)
+	require.NotNil(t, m)
 	require.WithinDuration(t, time.Now(), m.Time, 5*time.Second)
 }
 
@@ -395,9 +573,10 @@ func TestUnsupportedFieldSelector(t *testing.T) {
 	fieldSelectorString := "spec.containerName=container"
 	prom := &Prometheus{Log: testutil.Logger{}, KubernetesFieldSelector: fieldSelectorString}
 
-	fieldSelector, _ := fields.ParseSelector(prom.KubernetesFieldSelector)
+	fieldSelector, err := fields.ParseSelector(prom.KubernetesFieldSelector)
+	require.NoError(t, err)
 	isValid, invalidSelector := fieldSelectorIsSupported(fieldSelector)
-	require.Equal(t, false, isValid)
+	require.False(t, isValid)
 	require.Equal(t, "spec.containerName", invalidSelector)
 }
 
@@ -451,7 +630,7 @@ func TestInitConfigSelectors(t *testing.T) {
 		URLs:                        nil,
 		URLTag:                      "url",
 		MonitorPods:                 true,
-		MonitorKubernetesPodsMethod: MonitorMethodSettings,
+		MonitorKubernetesPodsMethod: monitorMethodSettings,
 		PodScrapeInterval:           60,
 		KubernetesLabelSelector:     "app=test",
 		KubernetesFieldSelector:     "spec.nodeName=node-0",
@@ -461,4 +640,303 @@ func TestInitConfigSelectors(t *testing.T) {
 
 	require.NotNil(t, p.podLabelSelector)
 	require.NotNil(t, p.podFieldSelector)
+}
+
+func TestPrometheusInternalOk(t *testing.T) {
+	prommetric := `# HELP test_counter A sample test counter.
+# TYPE test_counter counter
+test_counter{label="test"} 1 1685443805885`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, prommetric); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:                  testutil.Logger{},
+		KubernetesServices:   []string{ts.URL},
+		EnableRequestMetrics: true,
+	}
+	require.NoError(t, p.Init())
+
+	u, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	tsAddress := u.Hostname()
+
+	expected := []telegraf.Metric{
+		metric.New(
+			"prometheus_request",
+			map[string]string{
+				"address": tsAddress},
+			map[string]interface{}{
+				"content_length": int64(1),
+				"response_time":  float64(0)},
+			time.UnixMilli(0),
+			telegraf.Untyped,
+		),
+	}
+
+	var acc testutil.Accumulator
+	testutil.PrintMetrics(acc.GetTelegrafMetrics())
+
+	require.NoError(t, acc.GatherError(p.Gather))
+	testutil.RequireMetricsSubset(t, expected, acc.GetTelegrafMetrics(), testutil.IgnoreFields("content_length", "response_time"), testutil.IgnoreTime())
+}
+
+func TestPrometheusInternalContentBadFormat(t *testing.T) {
+	prommetric := `# HELP test_counter A sample test counter.
+# TYPE test_counter counter
+<body>Flag test</body>`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprintln(w, prommetric); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:                  testutil.Logger{},
+		KubernetesServices:   []string{ts.URL},
+		EnableRequestMetrics: true,
+	}
+	require.NoError(t, p.Init())
+
+	u, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	tsAddress := u.Hostname()
+
+	expected := []telegraf.Metric{
+		metric.New(
+			"prometheus_request",
+			map[string]string{
+				"address": tsAddress},
+			map[string]interface{}{
+				"content_length": int64(94),
+				"response_time":  float64(0)},
+			time.UnixMilli(0),
+			telegraf.Untyped,
+		),
+	}
+
+	var acc testutil.Accumulator
+	require.Error(t, acc.GatherError(p.Gather))
+	testutil.RequireMetricsSubset(t, expected, acc.GetTelegrafMetrics(), testutil.IgnoreFields("content_length", "response_time"), testutil.IgnoreTime())
+}
+
+func TestPrometheusInternalNoWeb(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:                  testutil.Logger{},
+		KubernetesServices:   []string{ts.URL},
+		EnableRequestMetrics: true,
+	}
+	require.NoError(t, p.Init())
+
+	u, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	tsAddress := u.Hostname()
+
+	expected := []telegraf.Metric{
+		metric.New(
+			"prometheus_request",
+			map[string]string{
+				"address": tsAddress},
+			map[string]interface{}{
+				"content_length": int64(94),
+				"response_time":  float64(0)},
+			time.UnixMilli(0),
+			telegraf.Untyped,
+		),
+	}
+
+	var acc testutil.Accumulator
+	testutil.PrintMetrics(acc.GetTelegrafMetrics())
+
+	require.Error(t, acc.GatherError(p.Gather))
+	testutil.RequireMetricsSubset(t, expected, acc.GetTelegrafMetrics(), testutil.IgnoreFields("content_length", "response_time"), testutil.IgnoreTime())
+}
+
+func TestOpenmetricsText(t *testing.T) {
+	const data = `
+# HELP go_memstats_gc_cpu_fraction The fraction of this program's available CPU time used by the GC since the program started.
+# TYPE go_memstats_gc_cpu_fraction gauge
+go_memstats_gc_cpu_fraction -0.00014404354379774563
+# HELP go_memstats_gc_sys_bytes Number of bytes used for garbage collection system metadata.
+# TYPE go_memstats_gc_sys_bytes gauge
+go_memstats_gc_sys_bytes 6.0936192e+07
+# HELP go_memstats_heap_alloc_bytes Number of heap bytes allocated and still in use.
+# TYPE go_memstats_heap_alloc_bytes gauge
+go_memstats_heap_alloc_bytes 1.581062048e+09
+# EOF
+`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Content-Type", "application/openmetrics-text;version=1.0.0")
+		if _, err := w.Write([]byte(data)); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:           &testutil.Logger{},
+		URLs:          []string{ts.URL},
+		URLTag:        "",
+		MetricVersion: 2,
+	}
+	require.NoError(t, p.Init())
+
+	var acc testutil.Accumulator
+	require.NoError(t, p.Gather(&acc))
+
+	expected := []telegraf.Metric{
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_gc_cpu_fraction": float64(-0.00014404354379774563)},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_gc_sys_bytes": 6.0936192e+07},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_heap_alloc_bytes": 1.581062048e+09},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+	}
+
+	testutil.RequireMetricsEqual(t, expected, acc.GetTelegrafMetrics(), testutil.IgnoreTime(), testutil.SortMetrics())
+}
+
+func TestOpenmetricsProtobuf(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "openmetric-proto.bin"))
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Content-Type", "application/openmetrics-protobuf;version=1.0.0")
+		if _, err := w.Write(data); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:           &testutil.Logger{},
+		URLs:          []string{ts.URL},
+		URLTag:        "",
+		MetricVersion: 2,
+	}
+	require.NoError(t, p.Init())
+
+	var acc testutil.Accumulator
+	require.NoError(t, p.Gather(&acc))
+
+	expected := []telegraf.Metric{
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_gc_cpu_fraction": float64(-0.00014404354379774563)},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_gc_sys_bytes": 6.0936192e+07},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_heap_alloc_bytes": 1.581062048e+09},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+	}
+
+	testutil.RequireMetricsEqual(t, expected, acc.GetTelegrafMetrics(), testutil.IgnoreTime(), testutil.SortMetrics())
+}
+
+func TestContentTypeOverride(t *testing.T) {
+	const data = `
+# HELP go_memstats_gc_cpu_fraction The fraction of this program's available CPU time used by the GC since the program started.
+# TYPE go_memstats_gc_cpu_fraction gauge
+go_memstats_gc_cpu_fraction -0.00014404354379774563
+# HELP go_memstats_gc_sys_bytes Number of bytes used for garbage collection system metadata.
+# TYPE go_memstats_gc_sys_bytes gauge
+go_memstats_gc_sys_bytes 6.0936192e+07
+# HELP go_memstats_heap_alloc_bytes Number of heap bytes allocated and still in use.
+# TYPE go_memstats_heap_alloc_bytes gauge
+go_memstats_heap_alloc_bytes 1.581062048e+09
+# EOF
+`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Provide a wrong version
+		w.Header().Add("Content-Type", "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited")
+		if _, err := w.Write([]byte(data)); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+			return
+		}
+	}))
+	defer ts.Close()
+
+	p := &Prometheus{
+		Log:                 &testutil.Logger{},
+		URLs:                []string{ts.URL},
+		URLTag:              "",
+		MetricVersion:       2,
+		ContentTypeOverride: "openmetrics-text",
+	}
+	require.NoError(t, p.Init())
+
+	var acc testutil.Accumulator
+	require.NoError(t, p.Gather(&acc))
+
+	expected := []telegraf.Metric{
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_gc_cpu_fraction": float64(-0.00014404354379774563)},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_gc_sys_bytes": 6.0936192e+07},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+		testutil.MustMetric(
+			"openmetric",
+			map[string]string{},
+			map[string]interface{}{"go_memstats_heap_alloc_bytes": 1.581062048e+09},
+			time.Unix(0, 0),
+			telegraf.Gauge,
+		),
+	}
+
+	testutil.RequireMetricsEqual(t, expected, acc.GetTelegrafMetrics(), testutil.IgnoreTime(), testutil.SortMetrics())
 }

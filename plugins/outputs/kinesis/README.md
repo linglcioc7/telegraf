@@ -1,15 +1,17 @@
 # Amazon Kinesis Output Plugin
 
-This is an experimental plugin that is still in the early stages of
-development. It will batch up all of the Points in one Put request to
-Kinesis. This should save the number of API requests by a considerable level.
+This plugin writes metrics to a [Amazon Kinesis][kinesis] endpoint. It will
+batch all Points in one request to reduce the number of API requests.
 
-## About Kinesis
+Please consult [Amazon's official documentation][docs] for more details on the
+Kinesis architecture and concepts.
 
-This is not the place to document all of the various Kinesis terms however it
-maybe useful for users to review Amazons official documentation which is
-available
-[here](http://docs.aws.amazon.com/kinesis/latest/dev/key-concepts.html).
+⭐ Telegraf v0.2.5
+🏷️ cloud, messaging
+💻 all
+
+[kinesis]: https://aws.amazon.com/kinesis
+[docs]: http://docs.aws.amazon.com/kinesis/latest/dev/key-concepts.html
 
 ## Amazon Authentication
 
@@ -78,6 +80,19 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## Kinesis StreamName must exist prior to starting telegraf.
   streamname = "StreamName"
 
+  ## Data format to output.
+  ## Each data format has its own unique set of configuration options, read
+  ## more about them here:
+  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
+  data_format = "influx"
+
+  ## debug will show upstream aws messages.
+  debug = false
+
+  ## NOTE: Due to the way TOML is parsed, tables must be at the END of the
+  ## plugin definition, otherwise additional config options are read as part of
+  ## the table
+
   ## The partition key can be calculated using one of several methods:
   ##
   ## Use a static value for all writes:
@@ -99,16 +114,6 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   #    method = "tag"
   #    key = "host"
   #    default = "mykey"
-
-
-  ## Data format to output.
-  ## Each data format has its own unique set of configuration options, read
-  ## more about them here:
-  ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
-  data_format = "influx"
-
-  ## debug will show upstream aws messages.
-  debug = false
 ```
 
 For this output plugin to function correctly the following variables must be

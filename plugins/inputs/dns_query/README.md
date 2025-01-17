@@ -1,7 +1,11 @@
 # DNS Query Input Plugin
 
-The DNS plugin gathers dns query times in miliseconds - like
-[Dig](https://en.wikipedia.org/wiki/Dig_\(command\))
+This plugin gathers information about DNS queries such as response time and
+result codes.
+
+⭐ Telegraf v1.4.0
+🏷️ system, network
+💻 all
 
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
@@ -84,6 +88,6 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
 ## Example Output
 
-```shell
+```text
 dns_query,domain=google.com,rcode=NOERROR,record_type=A,result=success,server=127.0.0.1 rcode_value=0i,result_code=0i,query_time_ms=0.13746 1550020750001000000
 ```

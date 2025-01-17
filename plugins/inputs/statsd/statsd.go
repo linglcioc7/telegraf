@@ -26,35 +26,19 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
+var errParsing = errors.New("error parsing statsd line")
+
 const (
-	// UDPMaxPacketSize is the UDP packet limit, see
+	// udpMaxPacketSize is the UDP packet limit, see
 	// https://en.wikipedia.org/wiki/User_Datagram_Protocol#Packet_structure
-	UDPMaxPacketSize int = 64 * 1024
+	udpMaxPacketSize int = 64 * 1024
 
-	defaultFieldName = "value"
-
-	defaultProtocol = "udp"
-
+	defaultFieldName           = "value"
+	defaultProtocol            = "udp"
 	defaultSeparator           = "_"
 	defaultAllowPendingMessage = 10000
 )
 
-var errParsing = errors.New("error parsing statsd line")
-
-// Number will get parsed as an int or float depending on what is passed
-type Number float64
-
-func (n *Number) UnmarshalTOML(b []byte) error {
-	value, err := strconv.ParseFloat(string(b), 64)
-	if err != nil {
-		return err
-	}
-
-	*n = Number(value)
-	return nil
-}
-
-// Statsd allows the importing of statsd and dogstatsd data.
 type Statsd struct {
 	// Protocol used on listener - udp or tcp
 	Protocol string `toml:"protocol"`
@@ -69,19 +53,24 @@ type Statsd struct {
 
 	// Percentiles specifies the percentiles that will be calculated for timing
 	// and histogram stats.
-	Percentiles     []Number `toml:"percentiles"`
+	Percentiles     []number `toml:"percentiles"`
 	PercentileLimit int      `toml:"percentile_limit"`
 	DeleteGauges    bool     `toml:"delete_gauges"`
 	DeleteCounters  bool     `toml:"delete_counters"`
 	DeleteSets      bool     `toml:"delete_sets"`
 	DeleteTimings   bool     `toml:"delete_timings"`
-	ConvertNames    bool     `toml:"convert_names" deprecated:"0.12.0;2.0.0;use 'metric_separator' instead"`
+	ConvertNames    bool     `toml:"convert_names"`
+	FloatCounters   bool     `toml:"float_counters"`
+	FloatTimings    bool     `toml:"float_timings"`
+	FloatSets       bool     `toml:"float_sets"`
+
+	EnableAggregationTemporality bool `toml:"enable_aggregation_temporality"`
 
 	// MetricSeparator is the separator between parts of the metric name.
 	MetricSeparator string `toml:"metric_separator"`
 	// This flag enables parsing of tags in the dogstatsd extension to the
 	// statsd protocol (http://docs.datadoghq.com/guides/dogstatsd/)
-	ParseDataDogTags bool `toml:"parse_data_dog_tags" deprecated:"1.10.0;use 'datadog_extensions' instead"`
+	ParseDataDogTags bool `toml:"parse_data_dog_tags" deprecated:"1.10.0;1.35.0;use 'datadog_extensions' instead"`
 
 	// Parses extensions to statsd in the datadog statsd format
 	// currently supports metrics and datadog tags.
@@ -93,11 +82,16 @@ type Statsd struct {
 	// https://docs.datadoghq.com/developers/metrics/types/?tab=distribution#definition
 	DataDogDistributions bool `toml:"datadog_distributions"`
 
+	// Either to keep or drop the container id as tag.
+	// Requires the DataDogExtension flag to be enabled.
+	// https://docs.datadoghq.com/developers/dogstatsd/datagram_shell/?tab=metrics#dogstatsd-protocol-v12
+	DataDogKeepContainerTag bool `toml:"datadog_keep_container_tag"`
+
 	// UDPPacketSize is deprecated, it's only here for legacy support
 	// we now always create 1 max size buffer and then copy only what we need
 	// into the in channel
 	// see https://github.com/influxdata/telegraf/pull/992
-	UDPPacketSize int `toml:"udp_packet_size" deprecated:"0.12.1;2.0.0;option is ignored"`
+	UDPPacketSize int `toml:"udp_packet_size" deprecated:"0.12.1;1.35.0;option is ignored"`
 
 	ReadBufferSize      int              `toml:"read_buffer_size"`
 	SanitizeNamesMethod string           `toml:"sanitize_name_method"`
@@ -156,6 +150,22 @@ type Statsd struct {
 	UDPBytesRecv       selfstat.Stat
 	ParseTimeNS        selfstat.Stat
 	PendingMessages    selfstat.Stat
+	MaxPendingMessages selfstat.Stat
+
+	lastGatherTime time.Time
+}
+
+// number will get parsed as an int or float depending on what is passed
+type number float64
+
+func (n *number) UnmarshalTOML(b []byte) error {
+	value, err := strconv.ParseFloat(string(b), 64)
+	if err != nil {
+		return err
+	}
+
+	*n = number(value)
+	return nil
 }
 
 type input struct {
@@ -202,7 +212,7 @@ type cachedcounter struct {
 
 type cachedtimings struct {
 	name      string
-	fields    map[string]RunningStats
+	fields    map[string]runningStats
 	tags      map[string]string
 	expiresAt time.Time
 }
@@ -217,78 +227,6 @@ func (*Statsd) SampleConfig() string {
 	return sampleConfig
 }
 
-func (s *Statsd) Gather(acc telegraf.Accumulator) error {
-	s.Lock()
-	defer s.Unlock()
-	now := time.Now()
-
-	for _, m := range s.distributions {
-		fields := map[string]interface{}{
-			defaultFieldName: m.value,
-		}
-		acc.AddFields(m.name, fields, m.tags, now)
-	}
-	s.distributions = make([]cacheddistributions, 0)
-
-	for _, m := range s.timings {
-		// Defining a template to parse field names for timers allows us to split
-		// out multiple fields per timer. In this case we prefix each stat with the
-		// field name and store these all in a single measurement.
-		fields := make(map[string]interface{})
-		for fieldName, stats := range m.fields {
-			var prefix string
-			if fieldName != defaultFieldName {
-				prefix = fieldName + "_"
-			}
-			fields[prefix+"mean"] = stats.Mean()
-			fields[prefix+"median"] = stats.Median()
-			fields[prefix+"stddev"] = stats.Stddev()
-			fields[prefix+"sum"] = stats.Sum()
-			fields[prefix+"upper"] = stats.Upper()
-			fields[prefix+"lower"] = stats.Lower()
-			fields[prefix+"count"] = stats.Count()
-			for _, percentile := range s.Percentiles {
-				name := fmt.Sprintf("%s%v_percentile", prefix, percentile)
-				fields[name] = stats.Percentile(float64(percentile))
-			}
-		}
-
-		acc.AddFields(m.name, fields, m.tags, now)
-	}
-	if s.DeleteTimings {
-		s.timings = make(map[string]cachedtimings)
-	}
-
-	for _, m := range s.gauges {
-		acc.AddGauge(m.name, m.fields, m.tags, now)
-	}
-	if s.DeleteGauges {
-		s.gauges = make(map[string]cachedgauge)
-	}
-
-	for _, m := range s.counters {
-		acc.AddCounter(m.name, m.fields, m.tags, now)
-	}
-	if s.DeleteCounters {
-		s.counters = make(map[string]cachedcounter)
-	}
-
-	for _, m := range s.sets {
-		fields := make(map[string]interface{})
-		for field, set := range m.fields {
-			fields[field] = int64(len(set))
-		}
-		acc.AddFields(m.name, fields, m.tags, now)
-	}
-	if s.DeleteSets {
-		s.sets = make(map[string]cachedset)
-	}
-
-	s.expireCachedMetrics()
-
-	return nil
-}
-
 func (s *Statsd) Start(ac telegraf.Accumulator) error {
 	if s.ParseDataDogTags {
 		s.DataDogExtensions = true
@@ -297,6 +235,7 @@ func (s *Statsd) Start(ac telegraf.Accumulator) error {
 	s.acc = ac
 
 	// Make data structures
+	s.lastGatherTime = time.Now()
 	s.gauges = make(map[string]cachedgauge)
 	s.counters = make(map[string]cachedcounter)
 	s.sets = make(map[string]cachedset)
@@ -305,6 +244,7 @@ func (s *Statsd) Start(ac telegraf.Accumulator) error {
 
 	s.Lock()
 	defer s.Unlock()
+
 	//
 	tags := map[string]string{
 		"address": s.ServiceAddress,
@@ -320,6 +260,8 @@ func (s *Statsd) Start(ac telegraf.Accumulator) error {
 	s.UDPBytesRecv = selfstat.Register("statsd", "udp_bytes_received", tags)
 	s.ParseTimeNS = selfstat.Register("statsd", "parse_time_ns", tags)
 	s.PendingMessages = selfstat.Register("statsd", "pending_messages", tags)
+	s.MaxPendingMessages = selfstat.Register("statsd", "max_pending_messages", tags)
+	s.MaxPendingMessages.Set(int64(s.AllowedPendingMessages))
 
 	s.in = make(chan input, s.AllowedPendingMessages)
 	s.done = make(chan struct{})
@@ -395,6 +337,147 @@ func (s *Statsd) Start(ac telegraf.Accumulator) error {
 	return nil
 }
 
+func (s *Statsd) Gather(acc telegraf.Accumulator) error {
+	s.Lock()
+	defer s.Unlock()
+	now := time.Now()
+
+	for _, m := range s.distributions {
+		fields := map[string]interface{}{
+			defaultFieldName: m.value,
+		}
+		if s.EnableAggregationTemporality {
+			fields["start_time"] = s.lastGatherTime.Format(time.RFC3339)
+		}
+		acc.AddFields(m.name, fields, m.tags, now)
+	}
+	s.distributions = make([]cacheddistributions, 0)
+
+	for _, m := range s.timings {
+		// Defining a template to parse field names for timers allows us to split
+		// out multiple fields per timer. In this case we prefix each stat with the
+		// field name and store these all in a single measurement.
+		fields := make(map[string]interface{})
+		for fieldName, stats := range m.fields {
+			var prefix string
+			if fieldName != defaultFieldName {
+				prefix = fieldName + "_"
+			}
+			fields[prefix+"mean"] = stats.mean()
+			fields[prefix+"median"] = stats.median()
+			fields[prefix+"stddev"] = stats.stddev()
+			fields[prefix+"sum"] = stats.sum()
+			fields[prefix+"upper"] = stats.upper()
+			fields[prefix+"lower"] = stats.lower()
+			if s.FloatTimings {
+				fields[prefix+"count"] = float64(stats.count())
+			} else {
+				fields[prefix+"count"] = stats.count()
+			}
+			for _, percentile := range s.Percentiles {
+				name := fmt.Sprintf("%s%v_percentile", prefix, percentile)
+				fields[name] = stats.percentile(float64(percentile))
+			}
+		}
+		if s.EnableAggregationTemporality {
+			fields["start_time"] = s.lastGatherTime.Format(time.RFC3339)
+		}
+
+		acc.AddFields(m.name, fields, m.tags, now)
+	}
+	if s.DeleteTimings {
+		s.timings = make(map[string]cachedtimings)
+	}
+
+	for _, m := range s.gauges {
+		if s.EnableAggregationTemporality && m.fields != nil {
+			m.fields["start_time"] = s.lastGatherTime.Format(time.RFC3339)
+		}
+
+		acc.AddGauge(m.name, m.fields, m.tags, now)
+	}
+	if s.DeleteGauges {
+		s.gauges = make(map[string]cachedgauge)
+	}
+
+	for _, m := range s.counters {
+		if s.EnableAggregationTemporality && m.fields != nil {
+			m.fields["start_time"] = s.lastGatherTime.Format(time.RFC3339)
+		}
+
+		if s.FloatCounters {
+			for key := range m.fields {
+				m.fields[key] = float64(m.fields[key].(int64))
+			}
+		}
+		acc.AddCounter(m.name, m.fields, m.tags, now)
+	}
+	if s.DeleteCounters {
+		s.counters = make(map[string]cachedcounter)
+	}
+
+	for _, m := range s.sets {
+		fields := make(map[string]interface{})
+		for field, set := range m.fields {
+			if s.FloatSets {
+				fields[field] = float64(len(set))
+			} else {
+				fields[field] = int64(len(set))
+			}
+		}
+		if s.EnableAggregationTemporality {
+			fields["start_time"] = s.lastGatherTime.Format(time.RFC3339)
+		}
+
+		acc.AddFields(m.name, fields, m.tags, now)
+	}
+	if s.DeleteSets {
+		s.sets = make(map[string]cachedset)
+	}
+
+	s.expireCachedMetrics()
+
+	s.lastGatherTime = now
+	return nil
+}
+
+func (s *Statsd) Stop() {
+	s.Lock()
+	s.Log.Infof("Stopping the statsd service")
+	close(s.done)
+	if s.isUDP() {
+		if s.UDPlistener != nil {
+			s.UDPlistener.Close()
+		}
+	} else {
+		if s.TCPlistener != nil {
+			s.TCPlistener.Close()
+		}
+
+		// Close all open TCP connections
+		//  - get all conns from the s.conns map and put into slice
+		//  - this is so the forget() function doesnt conflict with looping
+		//    over the s.conns map
+		var conns []*net.TCPConn
+		s.cleanup.Lock()
+		for _, conn := range s.conns {
+			conns = append(conns, conn)
+		}
+		s.cleanup.Unlock()
+		for _, conn := range conns {
+			conn.Close()
+		}
+	}
+	s.Unlock()
+
+	s.wg.Wait()
+
+	s.Lock()
+	close(s.in)
+	s.Log.Infof("Stopped listener service on %q", s.ServiceAddress)
+	s.Unlock()
+}
+
 // tcpListen() starts listening for TCP packets on the configured port.
 func (s *Statsd) tcpListen(listener *net.TCPListener) error {
 	for {
@@ -409,12 +492,12 @@ func (s *Statsd) tcpListen(listener *net.TCPListener) error {
 			}
 
 			if s.TCPKeepAlive {
-				if err = conn.SetKeepAlive(true); err != nil {
+				if err := conn.SetKeepAlive(true); err != nil {
 					return err
 				}
 
 				if s.TCPKeepAlivePeriod != nil {
-					if err = conn.SetKeepAlivePeriod(time.Duration(*s.TCPKeepAlivePeriod)); err != nil {
+					if err := conn.SetKeepAlivePeriod(time.Duration(*s.TCPKeepAlivePeriod)); err != nil {
 						return err
 					}
 				}
@@ -448,7 +531,7 @@ func (s *Statsd) udpListen(conn *net.UDPConn) error {
 		}
 	}
 
-	buf := make([]byte, UDPMaxPacketSize)
+	buf := make([]byte, udpMaxPacketSize)
 	for {
 		select {
 		case <-s.done:
@@ -466,12 +549,10 @@ func (s *Statsd) udpListen(conn *net.UDPConn) error {
 			s.UDPBytesRecv.Incr(int64(n))
 			b, ok := s.bufPool.Get().(*bytes.Buffer)
 			if !ok {
-				return fmt.Errorf("bufPool is not a bytes buffer")
+				return errors.New("bufPool is not a bytes buffer")
 			}
 			b.Reset()
-			if _, err := b.Write(buf[:n]); err != nil {
-				return err
-			}
+			b.Write(buf[:n])
 			select {
 			case s.in <- input{
 				Buffer: b,
@@ -548,6 +629,11 @@ func (s *Statsd) parseStatsdLine(line string) error {
 			if len(segment) > 0 && segment[0] == '#' {
 				// we have ourselves a tag; they are comma separated
 				parseDataDogTags(lineTags, segment[1:])
+			} else if len(segment) > 0 && strings.HasPrefix(segment, "c:") {
+				// This is optional container ID field
+				if s.DataDogKeepContainerTag {
+					lineTags["container"] = segment[2:]
+				}
 			} else {
 				recombinedSegments = append(recombinedSegments, segment)
 			}
@@ -644,6 +730,14 @@ func (s *Statsd) parseStatsdLine(line string) error {
 		switch m.mtype {
 		case "c":
 			m.tags["metric_type"] = "counter"
+
+			if s.EnableAggregationTemporality {
+				if s.DeleteCounters {
+					m.tags["temporality"] = "delta"
+				} else {
+					m.tags["temporality"] = "cumulative"
+				}
+			}
 		case "g":
 			m.tags["metric_type"] = "gauge"
 		case "s":
@@ -680,7 +774,7 @@ func (s *Statsd) parseStatsdLine(line string) error {
 // config file. If there is a match, it will parse the name of the metric and
 // map of tags.
 // Return values are (<name>, <field>, <tags>)
-func (s *Statsd) parseName(bucket string) (name string, field string, tags map[string]string) {
+func (s *Statsd) parseName(bucket string) (name, field string, tags map[string]string) {
 	s.Lock()
 	defer s.Unlock()
 	tags = make(map[string]string)
@@ -720,6 +814,7 @@ func (s *Statsd) parseName(bucket string) (name string, field string, tags map[s
 
 	if err == nil {
 		p.DefaultTags = tags
+		//nolint:errcheck // unable to propagate
 		name, tags, field, _ = p.ApplyTemplate(name)
 	}
 
@@ -735,7 +830,7 @@ func (s *Statsd) parseName(bucket string) (name string, field string, tags map[s
 }
 
 // Parse the key,value out of a string that looks like "key=value"
-func parseKeyValue(keyValue string) (key string, val string) {
+func parseKeyValue(keyValue string) (key, val string) {
 	split := strings.Split(keyValue, "=")
 	// Must be exactly 2 to get anything meaningful out of them
 	if len(split) == 2 {
@@ -777,7 +872,7 @@ func (s *Statsd) aggregate(m metric) {
 		if !ok {
 			cached = cachedtimings{
 				name:   m.name,
-				fields: make(map[string]RunningStats),
+				fields: make(map[string]runningStats),
 				tags:   m.tags,
 			}
 		}
@@ -785,16 +880,16 @@ func (s *Statsd) aggregate(m metric) {
 		// this will be the default field name, eg. "value"
 		field, ok := cached.fields[m.field]
 		if !ok {
-			field = RunningStats{
-				PercLimit: s.PercentileLimit,
+			field = runningStats{
+				percLimit: s.PercentileLimit,
 			}
 		}
 		if m.samplerate > 0 {
 			for i := 0; i < int(1.0/m.samplerate); i++ {
-				field.AddValue(m.floatvalue)
+				field.addValue(m.floatvalue)
 			}
 		} else {
-			field.AddValue(m.floatvalue)
+			field.addValue(m.floatvalue)
 		}
 		cached.fields[m.field] = field
 		cached.expiresAt = time.Now().Add(time.Duration(s.MaxTTL))
@@ -868,7 +963,7 @@ func (s *Statsd) handler(conn *net.TCPConn, id string) {
 	// connection cleanup function
 	defer func() {
 		s.wg.Done()
-		conn.Close() //nolint:revive // Ignore the returned error as we cannot do anything about it anyway
+		conn.Close()
 
 		// Add one connection potential back to channel when this one closes
 		s.accept <- true
@@ -900,8 +995,8 @@ func (s *Statsd) handler(conn *net.TCPConn, id string) {
 
 			b := s.bufPool.Get().(*bytes.Buffer)
 			b.Reset()
-			b.Write(scanner.Bytes()) //nolint:revive // Writes to a bytes buffer always succeed, so do not check the errors here
-			b.WriteByte('\n')        //nolint:revive // Writes to a bytes buffer always succeed, so do not check the errors here
+			b.Write(scanner.Bytes())
+			b.WriteByte('\n')
 
 			select {
 			case s.in <- input{Buffer: b, Time: time.Now(), Addr: remoteIP}:
@@ -920,7 +1015,7 @@ func (s *Statsd) handler(conn *net.TCPConn, id string) {
 
 // refuser refuses a TCP connection
 func (s *Statsd) refuser(conn *net.TCPConn) {
-	conn.Close() //nolint:revive // Ignore the returned error as we cannot do anything about it anyway
+	conn.Close()
 	s.Log.Infof("Refused TCP Connection from %s", conn.RemoteAddr())
 	s.Log.Warn("Maximum TCP Connections reached, you may want to adjust max_tcp_connections")
 }
@@ -937,43 +1032,6 @@ func (s *Statsd) remember(id string, conn *net.TCPConn) {
 	s.cleanup.Lock()
 	defer s.cleanup.Unlock()
 	s.conns[id] = conn
-}
-
-func (s *Statsd) Stop() {
-	s.Lock()
-	s.Log.Infof("Stopping the statsd service")
-	close(s.done)
-	if s.isUDP() {
-		if s.UDPlistener != nil {
-			s.UDPlistener.Close() //nolint:revive // Ignore the returned error as we cannot do anything about it anyway
-		}
-	} else {
-		if s.TCPlistener != nil {
-			s.TCPlistener.Close() //nolint:revive // Ignore the returned error as we cannot do anything about it anyway
-		}
-
-		// Close all open TCP connections
-		//  - get all conns from the s.conns map and put into slice
-		//  - this is so the forget() function doesnt conflict with looping
-		//    over the s.conns map
-		var conns []*net.TCPConn
-		s.cleanup.Lock()
-		for _, conn := range s.conns {
-			conns = append(conns, conn)
-		}
-		s.cleanup.Unlock()
-		for _, conn := range conns {
-			conn.Close() //nolint:revive // Ignore the returned error as we cannot do anything about it anyway
-		}
-	}
-	s.Unlock()
-
-	s.wg.Wait()
-
-	s.Lock()
-	close(s.in)
-	s.Log.Infof("Stopped listener service on %q", s.ServiceAddress)
-	s.Unlock()
 }
 
 // IsUDP returns true if the protocol is UDP, false otherwise.

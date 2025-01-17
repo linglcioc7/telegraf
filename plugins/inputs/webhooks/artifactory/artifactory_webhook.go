@@ -2,7 +2,7 @@ package artifactory
 
 import (
 	"crypto/hmac"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: Blocklisted import crypto/sha1: weak cryptographic primitive - sha1 hash is what is desired in this case
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -70,35 +70,35 @@ func (e *newEventError) Error() string {
 	return e.s
 }
 
-func (awh *ArtifactoryWebhook) NewEvent(data []byte, et string, ed string) (Event, error) {
+func (awh *ArtifactoryWebhook) NewEvent(data []byte, et, ed string) (event, error) {
 	awh.log.Debugf("New %v domain %v event received", ed, et)
 	switch ed {
 	case "artifact":
 		if et == "deployed" || et == "deleted" {
-			return generateEvent(data, &ArtifactDeploymentOrDeletedEvent{})
+			return generateEvent(data, &artifactDeploymentOrDeletedEvent{})
 		} else if et == "moved" || et == "copied" {
-			return generateEvent(data, &ArtifactMovedOrCopiedEvent{})
+			return generateEvent(data, &artifactMovedOrCopiedEvent{})
 		} else {
 			return nil, &newEventError{"Not a recognized event type"}
 		}
 	case "artifact_property":
-		return generateEvent(data, &ArtifactPropertiesEvent{})
+		return generateEvent(data, &artifactPropertiesEvent{})
 	case "docker":
-		return generateEvent(data, &DockerEvent{})
+		return generateEvent(data, &dockerEvent{})
 	case "build":
-		return generateEvent(data, &BuildEvent{})
+		return generateEvent(data, &buildEvent{})
 	case "release_bundle":
-		return generateEvent(data, &ReleaseBundleEvent{})
+		return generateEvent(data, &releaseBundleEvent{})
 	case "distribution":
-		return generateEvent(data, &DistributionEvent{})
+		return generateEvent(data, &distributionEvent{})
 	case "destination":
-		return generateEvent(data, &DestinationEvent{})
+		return generateEvent(data, &destinationEvent{})
 	}
 
 	return nil, &newEventError{"Not a recognized event type"}
 }
 
-func generateEvent(data []byte, event Event) (Event, error) {
+func generateEvent(data []byte, event event) (event, error) {
 	err := json.Unmarshal(data, event)
 	if err != nil {
 		return nil, err

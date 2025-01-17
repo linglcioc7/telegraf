@@ -17,6 +17,7 @@ func TagListToJSON(tagList []*telegraf.Tag) []byte {
 	for _, tag := range tagList {
 		tags[tag.Key] = tag.Value
 	}
+	//nolint:errcheck // unable to propagate error
 	bs, _ := json.Marshal(tags)
 	return bs
 }
@@ -71,16 +72,16 @@ func (l PGXLogger) Log(_ context.Context, level pgx.LogLevel, msg string, data m
 func GetTagID(metric telegraf.Metric) int64 {
 	hash := fnv.New64a()
 	for _, tag := range metric.TagList() {
-		hash.Write([]byte(tag.Key))   //nolint:revive // all Write() methods for hash in fnv.go returns nil err
-		hash.Write([]byte{0})         //nolint:revive // all Write() methods for hash in fnv.go returns nil err
-		hash.Write([]byte(tag.Value)) //nolint:revive // all Write() methods for hash in fnv.go returns nil err
-		hash.Write([]byte{0})         //nolint:revive // all Write() methods for hash in fnv.go returns nil err
+		hash.Write([]byte(tag.Key))
+		hash.Write([]byte{0})
+		hash.Write([]byte(tag.Value))
+		hash.Write([]byte{0})
 	}
 	// Convert to int64 as postgres does not support uint64
 	return int64(hash.Sum64())
 }
 
-// WaitGroup is similar to sync.WaitGroup, but allows interruptable waiting (e.g. a timeout).
+// WaitGroup is similar to sync.WaitGroup, but allows interruptible waiting (e.g. a timeout).
 type WaitGroup struct {
 	count int32
 	done  chan struct{}

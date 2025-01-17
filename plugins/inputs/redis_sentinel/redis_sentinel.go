@@ -4,6 +4,7 @@ package redis_sentinel
 import (
 	"bufio"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -21,27 +22,23 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
+const (
+	measurementMasters   = "redis_sentinel_masters"
+	measurementSentinel  = "redis_sentinel"
+	measurementSentinels = "redis_sentinel_sentinels"
+	measurementReplicas  = "redis_sentinel_replicas"
+)
+
 type RedisSentinel struct {
 	Servers []string `toml:"servers"`
 	tls.ClientConfig
 
-	clients []*RedisSentinelClient
+	clients []*redisSentinelClient
 }
 
-type RedisSentinelClient struct {
+type redisSentinelClient struct {
 	sentinel *redis.SentinelClient
 	tags     map[string]string
-}
-
-const measurementMasters = "redis_sentinel_masters"
-const measurementSentinel = "redis_sentinel"
-const measurementSentinels = "redis_sentinel_sentinels"
-const measurementReplicas = "redis_sentinel_replicas"
-
-func init() {
-	inputs.Add("redis_sentinel", func() telegraf.Input {
-		return &RedisSentinel{}
-	})
 }
 
 func (*RedisSentinel) SampleConfig() string {
@@ -58,21 +55,25 @@ func (r *RedisSentinel) Init() error {
 		return err
 	}
 
-	r.clients = make([]*RedisSentinelClient, 0, len(r.Servers))
+	r.clients = make([]*redisSentinelClient, 0, len(r.Servers))
 	for _, serv := range r.Servers {
 		u, err := url.Parse(serv)
 		if err != nil {
 			return fmt.Errorf("unable to parse to address %q: %w", serv, err)
 		}
 
+		username := ""
 		password := ""
 		if u.User != nil {
-			password, _ = u.User.Password()
+			username = u.User.Username()
+			pw, ok := u.User.Password()
+			if ok {
+				password = pw
+			}
 		}
 
 		var address string
-		tags := map[string]string{}
-
+		tags := make(map[string]string, 2)
 		switch u.Scheme {
 		case "tcp":
 			address = u.Host
@@ -88,6 +89,7 @@ func (r *RedisSentinel) Init() error {
 		sentinel := redis.NewSentinelClient(
 			&redis.Options{
 				Addr:      address,
+				Username:  username,
 				Password:  password,
 				Network:   u.Scheme,
 				PoolSize:  1,
@@ -95,11 +97,37 @@ func (r *RedisSentinel) Init() error {
 			},
 		)
 
-		r.clients = append(r.clients, &RedisSentinelClient{
+		r.clients = append(r.clients, &redisSentinelClient{
 			sentinel: sentinel,
 			tags:     tags,
 		})
 	}
+
+	return nil
+}
+
+func (r *RedisSentinel) Gather(acc telegraf.Accumulator) error {
+	var wg sync.WaitGroup
+
+	for _, client := range r.clients {
+		wg.Add(1)
+
+		go func(acc telegraf.Accumulator, client *redisSentinelClient) {
+			defer wg.Done()
+
+			masters, err := client.gatherMasterStats(acc)
+			acc.AddError(err)
+
+			for _, master := range masters {
+				acc.AddError(client.gatherReplicaStats(acc, master))
+				acc.AddError(client.gatherSentinelStats(acc, master))
+			}
+
+			acc.AddError(client.gatherInfoStats(acc))
+		}(acc, client)
+	}
+
+	wg.Wait()
 
 	return nil
 }
@@ -164,35 +192,7 @@ func prepareFieldValues(fields map[string]string, typeMap map[string]configField
 	return preparedFields, nil
 }
 
-// Reads stats from all configured servers accumulates stats.
-// Returns one of the errors encountered while gather stats (if any).
-func (r *RedisSentinel) Gather(acc telegraf.Accumulator) error {
-	var wg sync.WaitGroup
-
-	for _, client := range r.clients {
-		wg.Add(1)
-
-		go func(acc telegraf.Accumulator, client *RedisSentinelClient) {
-			defer wg.Done()
-
-			masters, err := client.gatherMasterStats(acc)
-			acc.AddError(err)
-
-			for _, master := range masters {
-				acc.AddError(client.gatherReplicaStats(acc, master))
-				acc.AddError(client.gatherSentinelStats(acc, master))
-			}
-
-			acc.AddError(client.gatherInfoStats(acc))
-		}(acc, client)
-	}
-
-	wg.Wait()
-
-	return nil
-}
-
-func (client *RedisSentinelClient) gatherInfoStats(acc telegraf.Accumulator) error {
+func (client *redisSentinelClient) gatherInfoStats(acc telegraf.Accumulator) error {
 	infoCmd := redis.NewStringCmd("info", "all")
 	if err := client.sentinel.Process(infoCmd); err != nil {
 		return err
@@ -214,7 +214,7 @@ func (client *RedisSentinelClient) gatherInfoStats(acc telegraf.Accumulator) err
 	return nil
 }
 
-func (client *RedisSentinelClient) gatherMasterStats(acc telegraf.Accumulator) ([]string, error) {
+func (client *redisSentinelClient) gatherMasterStats(acc telegraf.Accumulator) ([]string, error) {
 	mastersCmd := redis.NewSliceCmd("sentinel", "masters")
 	if err := client.sentinel.Process(mastersCmd); err != nil {
 		return nil, err
@@ -232,14 +232,14 @@ func (client *RedisSentinelClient) gatherMasterStats(acc telegraf.Accumulator) (
 	for _, master := range masters {
 		master, ok := master.([]interface{})
 		if !ok {
-			return masterNames, fmt.Errorf("unable to process master response")
+			return masterNames, errors.New("unable to process master response")
 		}
 
 		m := toMap(master)
 
 		masterName, ok := m["name"]
 		if !ok {
-			return masterNames, fmt.Errorf("unable to resolve master name")
+			return masterNames, errors.New("unable to resolve master name")
 		}
 		masterNames = append(masterNames, masterName)
 
@@ -256,7 +256,7 @@ func (client *RedisSentinelClient) gatherMasterStats(acc telegraf.Accumulator) (
 	return masterNames, nil
 }
 
-func (client *RedisSentinelClient) gatherReplicaStats(acc telegraf.Accumulator, masterName string) error {
+func (client *redisSentinelClient) gatherReplicaStats(acc telegraf.Accumulator, masterName string) error {
 	replicasCmd := redis.NewSliceCmd("sentinel", "replicas", masterName)
 	if err := client.sentinel.Process(replicasCmd); err != nil {
 		return err
@@ -273,7 +273,7 @@ func (client *RedisSentinelClient) gatherReplicaStats(acc telegraf.Accumulator, 
 	for _, replica := range replicas {
 		replica, ok := replica.([]interface{})
 		if !ok {
-			return fmt.Errorf("unable to process replica response")
+			return errors.New("unable to process replica response")
 		}
 
 		rm := toMap(replica)
@@ -288,7 +288,7 @@ func (client *RedisSentinelClient) gatherReplicaStats(acc telegraf.Accumulator, 
 	return nil
 }
 
-func (client *RedisSentinelClient) gatherSentinelStats(acc telegraf.Accumulator, masterName string) error {
+func (client *redisSentinelClient) gatherSentinelStats(acc telegraf.Accumulator, masterName string) error {
 	sentinelsCmd := redis.NewSliceCmd("sentinel", "sentinels", masterName)
 	if err := client.sentinel.Process(sentinelsCmd); err != nil {
 		return err
@@ -305,7 +305,7 @@ func (client *RedisSentinelClient) gatherSentinelStats(acc telegraf.Accumulator,
 	for _, sentinel := range sentinels {
 		sentinel, ok := sentinel.([]interface{})
 		if !ok {
-			return fmt.Errorf("unable to process sentinel response")
+			return errors.New("unable to process sentinel response")
 		}
 
 		sm := toMap(sentinel)
@@ -321,11 +321,7 @@ func (client *RedisSentinelClient) gatherSentinelStats(acc telegraf.Accumulator,
 }
 
 // converts `sentinel masters <name>` output to tags and fields
-func convertSentinelMastersOutput(
-	globalTags map[string]string,
-	master map[string]string,
-	quorumErr error,
-) (map[string]string, map[string]interface{}, error) {
+func convertSentinelMastersOutput(globalTags, master map[string]string, quorumErr error) (map[string]string, map[string]interface{}, error) {
 	tags := globalTags
 
 	tags["master"] = master["name"]
@@ -382,10 +378,7 @@ func convertSentinelReplicaOutput(
 
 // convertSentinelInfoOutput parses `INFO` command output
 // Largely copied from the Redis input plugin's gatherInfoOutput()
-func convertSentinelInfoOutput(
-	globalTags map[string]string,
-	rdr io.Reader,
-) (map[string]string, map[string]interface{}, error) {
+func convertSentinelInfoOutput(globalTags map[string]string, rdr io.Reader) (map[string]string, map[string]interface{}, error) {
 	scanner := bufio.NewScanner(rdr)
 	rawFields := make(map[string]string)
 
@@ -434,4 +427,10 @@ func convertSentinelInfoOutput(
 	delete(fields, "connected_clients")
 
 	return tags, fields, nil
+}
+
+func init() {
+	inputs.Add("redis_sentinel", func() telegraf.Input {
+		return &RedisSentinel{}
+	})
 }

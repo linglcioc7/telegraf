@@ -24,9 +24,28 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
+var disconnectedServersBehavior = []string{"error", "ignore"}
+
 const magicIdleCount = -int(^uint(0) >> 1)
 
-type Query struct {
+type SQL struct {
+	Driver                      string          `toml:"driver"`
+	Dsn                         config.Secret   `toml:"dsn"`
+	Timeout                     config.Duration `toml:"timeout"`
+	MaxIdleTime                 config.Duration `toml:"connection_max_idle_time"`
+	MaxLifetime                 config.Duration `toml:"connection_max_life_time"`
+	MaxOpenConnections          int             `toml:"connection_max_open"`
+	MaxIdleConnections          int             `toml:"connection_max_idle"`
+	Queries                     []query         `toml:"query"`
+	Log                         telegraf.Logger `toml:"-"`
+	DisconnectedServersBehavior string          `toml:"disconnected_servers_behavior"`
+
+	driverName      string
+	db              *dbsql.DB
+	serverConnected bool
+}
+
+type query struct {
 	Query               string   `toml:"query"`
 	Script              string   `toml:"query_script"`
 	Measurement         string   `toml:"measurement"`
@@ -51,172 +70,6 @@ type Query struct {
 	fieldFilterUint   filter.Filter
 	fieldFilterBool   filter.Filter
 	fieldFilterString filter.Filter
-}
-
-func (q *Query) parse(acc telegraf.Accumulator, rows *dbsql.Rows, t time.Time) (int, error) {
-	columnNames, err := rows.Columns()
-	if err != nil {
-		return 0, err
-	}
-
-	// Prepare the list of datapoints according to the received row
-	columnData := make([]interface{}, len(columnNames))
-	columnDataPtr := make([]interface{}, len(columnNames))
-
-	for i := range columnData {
-		columnDataPtr[i] = &columnData[i]
-	}
-
-	rowCount := 0
-	for rows.Next() {
-		measurement := q.Measurement
-		timestamp := t
-		tags := make(map[string]string)
-		fields := make(map[string]interface{}, len(columnNames))
-
-		// Do the parsing with (hopefully) automatic type conversion
-		if err := rows.Scan(columnDataPtr...); err != nil {
-			return 0, err
-		}
-
-		for i, name := range columnNames {
-			if q.MeasurementColumn != "" && name == q.MeasurementColumn {
-				switch raw := columnData[i].(type) {
-				case string:
-					measurement = raw
-				case []byte:
-					measurement = string(raw)
-				default:
-					return 0, fmt.Errorf("measurement column type \"%T\" unsupported", columnData[i])
-				}
-			}
-
-			if q.TimeColumn != "" && name == q.TimeColumn {
-				var fieldvalue interface{}
-				var skipParsing bool
-
-				switch v := columnData[i].(type) {
-				case string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
-					fieldvalue = v
-				case []byte:
-					fieldvalue = string(v)
-				case time.Time:
-					timestamp = v
-					skipParsing = true
-				case fmt.Stringer:
-					fieldvalue = v.String()
-				default:
-					return 0, fmt.Errorf("time column %q of type \"%T\" unsupported", name, columnData[i])
-				}
-				if !skipParsing {
-					if timestamp, err = internal.ParseTimestamp(q.TimeFormat, fieldvalue, ""); err != nil {
-						return 0, fmt.Errorf("parsing time failed: %w", err)
-					}
-				}
-			}
-
-			if q.tagFilter.Match(name) {
-				tagvalue, err := internal.ToString(columnData[i])
-				if err != nil {
-					return 0, fmt.Errorf("converting tag column %q failed: %w", name, err)
-				}
-				if v := strings.TrimSpace(tagvalue); v != "" {
-					tags[name] = v
-				}
-			}
-
-			// Explicit type conversions take precedence
-			if q.fieldFilterFloat.Match(name) {
-				v, err := internal.ToFloat64(columnData[i])
-				if err != nil {
-					return 0, fmt.Errorf("converting field column %q to float failed: %w", name, err)
-				}
-				fields[name] = v
-				continue
-			}
-
-			if q.fieldFilterInt.Match(name) {
-				v, err := internal.ToInt64(columnData[i])
-				if err != nil {
-					return 0, fmt.Errorf("converting field column %q to int failed: %w", name, err)
-				}
-				fields[name] = v
-				continue
-			}
-
-			if q.fieldFilterUint.Match(name) {
-				v, err := internal.ToUint64(columnData[i])
-				if err != nil {
-					return 0, fmt.Errorf("converting field column %q to uint failed: %w", name, err)
-				}
-				fields[name] = v
-				continue
-			}
-
-			if q.fieldFilterBool.Match(name) {
-				v, err := internal.ToBool(columnData[i])
-				if err != nil {
-					return 0, fmt.Errorf("converting field column %q to bool failed: %w", name, err)
-				}
-				fields[name] = v
-				continue
-			}
-
-			if q.fieldFilterString.Match(name) {
-				v, err := internal.ToString(columnData[i])
-				if err != nil {
-					return 0, fmt.Errorf("converting field column %q to string failed: %w", name, err)
-				}
-				fields[name] = v
-				continue
-			}
-
-			// Try automatic conversion for all remaining fields
-			if q.fieldFilter.Match(name) {
-				var fieldvalue interface{}
-				switch v := columnData[i].(type) {
-				case string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
-					fieldvalue = v
-				case []byte:
-					fieldvalue = string(v)
-				case time.Time:
-					fieldvalue = v.UnixNano()
-				case nil:
-					fieldvalue = nil
-				case fmt.Stringer:
-					fieldvalue = v.String()
-				default:
-					return 0, fmt.Errorf("field column %q of type \"%T\" unsupported", name, columnData[i])
-				}
-				if fieldvalue != nil {
-					fields[name] = fieldvalue
-				}
-			}
-		}
-		acc.AddFields(measurement, fields, tags, timestamp)
-		rowCount++
-	}
-
-	if err := rows.Err(); err != nil {
-		return rowCount, err
-	}
-
-	return rowCount, nil
-}
-
-type SQL struct {
-	Driver             string          `toml:"driver"`
-	Dsn                config.Secret   `toml:"dsn"`
-	Timeout            config.Duration `toml:"timeout"`
-	MaxIdleTime        config.Duration `toml:"connection_max_idle_time"`
-	MaxLifetime        config.Duration `toml:"connection_max_life_time"`
-	MaxOpenConnections int             `toml:"connection_max_open"`
-	MaxIdleConnections int             `toml:"connection_max_idle"`
-	Queries            []Query         `toml:"query"`
-	Log                telegraf.Logger `toml:"-"`
-
-	driverName string
-	db         *dbsql.DB
 }
 
 func (*SQL) SampleConfig() string {
@@ -323,6 +176,7 @@ func (s *SQL) Init() error {
 		"mssql":     "sqlserver",
 		"maria":     "mysql",
 		"postgres":  "pgx",
+		"oracle":    "oracle",
 	}
 	s.driverName = s.Driver
 	if driver, ok := aliases[s.Driver]; ok {
@@ -351,50 +205,61 @@ func (s *SQL) Init() error {
 		return fmt.Errorf("driver %q not supported use one of %v", s.Driver, availDrivers)
 	}
 
+	if s.DisconnectedServersBehavior == "" {
+		s.DisconnectedServersBehavior = "error"
+	}
+
+	if !choice.Contains(s.DisconnectedServersBehavior, disconnectedServersBehavior) {
+		return fmt.Errorf("%q is not a valid value for disconnected_servers_behavior", s.DisconnectedServersBehavior)
+	}
+
 	return nil
 }
 
-func (s *SQL) Start(_ telegraf.Accumulator) error {
-	var err error
-
-	// Connect to the database server
-	dsn, err := s.Dsn.Get()
-	if err != nil {
-		return fmt.Errorf("getting DSN failed: %w", err)
-	}
-	defer config.ReleaseSecret(dsn)
-	s.Log.Debug("Connecting...")
-	s.db, err = dbsql.Open(s.driverName, string(dsn))
-	if err != nil {
+func (s *SQL) Start(telegraf.Accumulator) error {
+	if err := s.setupConnection(); err != nil {
 		return err
 	}
 
-	// Set the connection limits
-	// s.db.SetConnMaxIdleTime(time.Duration(s.MaxIdleTime)) // Requires go >= 1.15
-	s.db.SetConnMaxLifetime(time.Duration(s.MaxLifetime))
-	s.db.SetMaxOpenConns(s.MaxOpenConnections)
-	s.db.SetMaxIdleConns(s.MaxIdleConnections)
-
-	// Test if the connection can be established
-	s.Log.Debug("Testing connectivity...")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout))
-	err = s.db.PingContext(ctx)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("connecting to database failed: %w", err)
-	}
-
-	// Prepare the statements
-	for i, q := range s.Queries {
-		s.Log.Debugf("Preparing statement %q...", q.Query)
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout))
-		stmt, err := s.db.PrepareContext(ctx, q.Query)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("preparing query %q failed: %w", q.Query, err)
+	if err := s.ping(); err != nil {
+		if s.DisconnectedServersBehavior == "error" {
+			return err
 		}
-		s.Queries[i].statement = stmt
+		s.Log.Errorf("unable to connect to database: %s", err)
 	}
+	if s.serverConnected {
+		s.prepareStatements()
+	}
+
+	return nil
+}
+
+func (s *SQL) Gather(acc telegraf.Accumulator) error {
+	// during plugin startup, it is possible that the server was not reachable.
+	// we try pinging the server in this collection cycle.
+	// we are only concerned with `prepareStatements` function to complete(return true), just once.
+	if !s.serverConnected {
+		if err := s.ping(); err != nil {
+			return err
+		}
+		s.prepareStatements()
+	}
+
+	var wg sync.WaitGroup
+	tstart := time.Now()
+	for _, q := range s.Queries {
+		wg.Add(1)
+		go func(q query) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout))
+			defer cancel()
+			if err := s.executeQuery(ctx, acc, q, tstart); err != nil {
+				acc.AddError(err)
+			}
+		}(q)
+	}
+	wg.Wait()
+	s.Log.Debugf("Executed %d queries in %s", len(s.Queries), time.Since(tstart).String())
 
 	return nil
 }
@@ -417,24 +282,258 @@ func (s *SQL) Stop() {
 	}
 }
 
-func (s *SQL) Gather(acc telegraf.Accumulator) error {
-	var wg sync.WaitGroup
-	tstart := time.Now()
-	for _, query := range s.Queries {
-		wg.Add(1)
-		go func(q Query) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout))
-			defer cancel()
-			if err := s.executeQuery(ctx, acc, q, tstart); err != nil {
-				acc.AddError(err)
-			}
-		}(query)
+func (s *SQL) setupConnection() error {
+	// Connect to the database server
+	dsnSecret, err := s.Dsn.Get()
+	if err != nil {
+		return fmt.Errorf("getting DSN failed: %w", err)
 	}
-	wg.Wait()
-	s.Log.Debugf("Executed %d queries in %s", len(s.Queries), time.Since(tstart).String())
+	dsn := dsnSecret.String()
+	dsnSecret.Destroy()
 
+	s.Log.Debug("Connecting...")
+	s.db, err = dbsql.Open(s.driverName, dsn)
+	if err != nil {
+		// should return since the error is most likely with invalid DSN string format
+		return err
+	}
+
+	// Set the connection limits
+	// s.db.SetConnMaxIdleTime(time.Duration(s.MaxIdleTime)) // Requires go >= 1.15
+	s.db.SetConnMaxLifetime(time.Duration(s.MaxLifetime))
+	s.db.SetMaxOpenConns(s.MaxOpenConnections)
+	s.db.SetMaxIdleConns(s.MaxIdleConnections)
 	return nil
+}
+
+func (s *SQL) ping() error {
+	// Test if the connection can be established
+	s.Log.Debug("Testing connectivity...")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout))
+	err := s.db.PingContext(ctx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("unable to connect to database: %w", err)
+	}
+	s.serverConnected = true
+	return nil
+}
+
+func (s *SQL) prepareStatements() {
+	// Prepare the statements
+	for i, q := range s.Queries {
+		s.Log.Debugf("Preparing statement %q...", q.Query)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.Timeout))
+		stmt, err := s.db.PrepareContext(ctx, q.Query)
+		cancel()
+		if err != nil {
+			// Some database drivers or databases do not support prepare
+			// statements and report an error here. However, we can still
+			// execute unprepared queries for those setups so do not bail-out
+			// here but simply do leave the `statement` with a `nil` value
+			// indicating no prepared statement.
+			s.Log.Warnf("preparing query %q failed: %s; falling back to unprepared query", q.Query, err)
+			continue
+		}
+		s.Queries[i].statement = stmt
+	}
+}
+
+func (s *SQL) executeQuery(ctx context.Context, acc telegraf.Accumulator, q query, tquery time.Time) error {
+	// Execute the query either prepared or unprepared
+	var rows *dbsql.Rows
+	if q.statement != nil {
+		// Use the previously prepared query
+		var err error
+		rows, err = q.statement.QueryContext(ctx)
+		if err != nil {
+			return err
+		}
+	} else {
+		// Fallback to unprepared query
+		var err error
+		rows, err = s.db.Query(q.Query)
+		if err != nil {
+			return err
+		}
+	}
+	defer rows.Close()
+
+	// Handle the rows
+	columnNames, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	rowCount, err := q.parse(acc, rows, tquery, s.Log)
+	s.Log.Debugf("Received %d rows and %d columns for query %q", rowCount, len(columnNames), q.Query)
+
+	return err
+}
+
+func (s *SQL) checkDSN() error {
+	if s.Dsn.Empty() {
+		return errors.New("missing data source name (DSN) option")
+	}
+	return nil
+}
+
+func (q *query) parse(acc telegraf.Accumulator, rows *dbsql.Rows, t time.Time, logger telegraf.Logger) (int, error) {
+	columnNames, err := rows.Columns()
+	if err != nil {
+		return 0, err
+	}
+
+	// Prepare the list of datapoints according to the received row
+	columnData := make([]interface{}, len(columnNames))
+	columnDataPtr := make([]interface{}, len(columnNames))
+
+	for i := range columnData {
+		columnDataPtr[i] = &columnData[i]
+	}
+
+	rowCount := 0
+	for rows.Next() {
+		measurement := q.Measurement
+		timestamp := t
+		tags := make(map[string]string)
+		fields := make(map[string]interface{}, len(columnNames))
+
+		// Do the parsing with (hopefully) automatic type conversion
+		if err := rows.Scan(columnDataPtr...); err != nil {
+			return 0, err
+		}
+
+		for i, name := range columnNames {
+			if q.MeasurementColumn != "" && name == q.MeasurementColumn {
+				switch raw := columnData[i].(type) {
+				case string:
+					measurement = raw
+				case []byte:
+					measurement = string(raw)
+				default:
+					return 0, fmt.Errorf("measurement column type \"%T\" unsupported", columnData[i])
+				}
+			}
+
+			if q.TimeColumn != "" && name == q.TimeColumn {
+				var fieldvalue interface{}
+				var skipParsing bool
+
+				switch v := columnData[i].(type) {
+				case string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+					fieldvalue = v
+				case []byte:
+					fieldvalue = string(v)
+				case time.Time:
+					timestamp = v
+					skipParsing = true
+				case fmt.Stringer:
+					fieldvalue = v.String()
+				default:
+					return 0, fmt.Errorf("time column %q of type \"%T\" unsupported", name, columnData[i])
+				}
+				if !skipParsing {
+					if timestamp, err = internal.ParseTimestamp(q.TimeFormat, fieldvalue, nil); err != nil {
+						return 0, fmt.Errorf("parsing time failed: %w", err)
+					}
+				}
+			}
+
+			if q.tagFilter.Match(name) {
+				tagvalue, err := internal.ToString(columnData[i])
+				if err != nil {
+					return 0, fmt.Errorf("converting tag column %q failed: %w", name, err)
+				}
+				if v := strings.TrimSpace(tagvalue); v != "" {
+					tags[name] = v
+				}
+			}
+
+			// Explicit type conversions take precedence
+			if q.fieldFilterFloat.Match(name) {
+				v, err := internal.ToFloat64(columnData[i])
+				if err != nil {
+					return 0, fmt.Errorf("converting field column %q to float failed: %w", name, err)
+				}
+				fields[name] = v
+				continue
+			}
+
+			if q.fieldFilterInt.Match(name) {
+				v, err := internal.ToInt64(columnData[i])
+				if err != nil {
+					if err != nil {
+						if !errors.Is(err, internal.ErrOutOfRange) {
+							return 0, fmt.Errorf("converting field column %q to int failed: %w", name, err)
+						}
+						logger.Warnf("field column %q: %v", name, err)
+					}
+				}
+				fields[name] = v
+				continue
+			}
+
+			if q.fieldFilterUint.Match(name) {
+				v, err := internal.ToUint64(columnData[i])
+				if err != nil {
+					if !errors.Is(err, internal.ErrOutOfRange) {
+						return 0, fmt.Errorf("converting field column %q to uint failed: %w", name, err)
+					}
+					logger.Warnf("field column %q: %v", name, err)
+				}
+				fields[name] = v
+				continue
+			}
+
+			if q.fieldFilterBool.Match(name) {
+				v, err := internal.ToBool(columnData[i])
+				if err != nil {
+					return 0, fmt.Errorf("converting field column %q to bool failed: %w", name, err)
+				}
+				fields[name] = v
+				continue
+			}
+
+			if q.fieldFilterString.Match(name) {
+				v, err := internal.ToString(columnData[i])
+				if err != nil {
+					return 0, fmt.Errorf("converting field column %q to string failed: %w", name, err)
+				}
+				fields[name] = v
+				continue
+			}
+
+			// Try automatic conversion for all remaining fields
+			if q.fieldFilter.Match(name) {
+				var fieldvalue interface{}
+				switch v := columnData[i].(type) {
+				case string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
+					fieldvalue = v
+				case []byte:
+					fieldvalue = string(v)
+				case time.Time:
+					fieldvalue = v.UnixNano()
+				case nil:
+					fieldvalue = nil
+				case fmt.Stringer:
+					fieldvalue = v.String()
+				default:
+					return 0, fmt.Errorf("field column %q of type \"%T\" unsupported", name, columnData[i])
+				}
+				if fieldvalue != nil {
+					fields[name] = fieldvalue
+				}
+			}
+		}
+		acc.AddFields(measurement, fields, tags, timestamp)
+		rowCount++
+	}
+
+	if err := rows.Err(); err != nil {
+		return rowCount, err
+	}
+
+	return rowCount, nil
 }
 
 func init() {
@@ -446,39 +545,4 @@ func init() {
 			MaxIdleConnections: magicIdleCount,     // will trigger auto calculation
 		}
 	})
-}
-
-func (s *SQL) executeQuery(ctx context.Context, acc telegraf.Accumulator, q Query, tquery time.Time) error {
-	if q.statement == nil {
-		return fmt.Errorf("statement is nil for query %q", q.Query)
-	}
-
-	// Execute the query
-	rows, err := q.statement.QueryContext(ctx)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	// Handle the rows
-	columnNames, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-	rowCount, err := q.parse(acc, rows, tquery)
-	s.Log.Debugf("Received %d rows and %d columns for query %q", rowCount, len(columnNames), q.Query)
-
-	return err
-}
-
-func (s *SQL) checkDSN() error {
-	dsn, err := s.Dsn.Get()
-	if err != nil {
-		return fmt.Errorf("getting DSN failed: %w", err)
-	}
-	defer config.ReleaseSecret(dsn)
-	if len(dsn) == 0 {
-		return errors.New("missing data source name (DSN) option")
-	}
-	return nil
 }

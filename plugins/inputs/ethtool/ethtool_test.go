@@ -3,82 +3,87 @@
 package ethtool
 
 import (
+	"errors"
 	"net"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/influxdata/telegraf/testutil"
 )
 
 var (
-	command      *Ethtool
-	interfaceMap map[string]*InterfaceMock
+	eth          *Ethtool
+	interfaceMap map[string]*interfaceMock
 )
 
-type InterfaceMock struct {
-	Name          string
-	DriverName    string
-	NamespaceName string
-	Stat          map[string]uint64
-	LoopBack      bool
-	InterfaceUp   bool
+type interfaceMock struct {
+	name          string
+	driverName    string
+	namespaceName string
+	stat          map[string]uint64
+	loopBack      bool
+	interfaceUp   bool
+	cmdGet        map[string]uint64
 }
 
-type NamespaceMock struct {
-	name string
+type namespaceMock struct {
+	namespaceName string
 }
 
-func (n *NamespaceMock) Name() string {
-	return n.name
+func (n *namespaceMock) name() string {
+	return n.namespaceName
 }
 
-func (n *NamespaceMock) Interfaces() ([]NamespacedInterface, error) {
+func (*namespaceMock) interfaces() ([]namespacedInterface, error) {
 	return nil, errors.New("it is a test bug to invoke this function")
 }
 
-func (n *NamespaceMock) DriverName(_ NamespacedInterface) (string, error) {
+func (*namespaceMock) driverName(_ namespacedInterface) (string, error) {
 	return "", errors.New("it is a test bug to invoke this function")
 }
 
-func (n *NamespaceMock) Stats(_ NamespacedInterface) (map[string]uint64, error) {
+func (*namespaceMock) stats(_ namespacedInterface) (map[string]uint64, error) {
 	return nil, errors.New("it is a test bug to invoke this function")
 }
 
-type CommandEthtoolMock struct {
-	InterfaceMap map[string]*InterfaceMock
+func (*namespaceMock) get(_ namespacedInterface) (map[string]uint64, error) {
+	return nil, errors.New("it is a test bug to invoke this function")
 }
 
-func (c *CommandEthtoolMock) Init() error {
+type commandEthtoolMock struct {
+	interfaceMap map[string]*interfaceMock
+}
+
+func (*commandEthtoolMock) init() error {
 	// Not required for test mock
 	return nil
 }
 
-func (c *CommandEthtoolMock) DriverName(intf NamespacedInterface) (string, error) {
-	i := c.InterfaceMap[intf.Name]
+func (c *commandEthtoolMock) driverName(intf namespacedInterface) (string, error) {
+	i := c.interfaceMap[intf.Name]
 	if i != nil {
-		return i.DriverName, nil
+		return i.driverName, nil
 	}
 	return "", errors.New("interface not found")
 }
 
-func (c *CommandEthtoolMock) Interfaces(includeNamespaces bool) ([]NamespacedInterface, error) {
-	namespaces := map[string]*NamespaceMock{"": {name: ""}}
+func (c *commandEthtoolMock) interfaces(includeNamespaces bool) ([]namespacedInterface, error) {
+	namespaces := map[string]*namespaceMock{"": {namespaceName: ""}}
 
-	interfaces := make([]NamespacedInterface, 0)
-	for k, v := range c.InterfaceMap {
-		if v.NamespaceName != "" && !includeNamespaces {
+	interfaces := make([]namespacedInterface, 0)
+	for k, v := range c.interfaceMap {
+		if v.namespaceName != "" && !includeNamespaces {
 			continue
 		}
 
 		var flag net.Flags
 		// When interface is up
-		if v.InterfaceUp {
+		if v.interfaceUp {
 			flag |= net.FlagUp
 		}
 		// For loopback interface
-		if v.LoopBack {
+		if v.loopBack {
 			flag |= net.FlagLoopback
 		}
 
@@ -92,33 +97,41 @@ func (c *CommandEthtoolMock) Interfaces(includeNamespaces bool) ([]NamespacedInt
 		}
 
 		// Ensure there is a namespace if necessary
-		if _, ok := namespaces[v.NamespaceName]; !ok {
-			namespaces[v.NamespaceName] = &NamespaceMock{
-				name: v.NamespaceName,
+		if _, ok := namespaces[v.namespaceName]; !ok {
+			namespaces[v.namespaceName] = &namespaceMock{
+				namespaceName: v.namespaceName,
 			}
 		}
 
 		interfaces = append(
 			interfaces,
-			NamespacedInterface{
+			namespacedInterface{
 				Interface: iface,
-				Namespace: namespaces[v.NamespaceName],
+				namespace: namespaces[v.namespaceName],
 			},
 		)
 	}
 	return interfaces, nil
 }
 
-func (c *CommandEthtoolMock) Stats(intf NamespacedInterface) (map[string]uint64, error) {
-	i := c.InterfaceMap[intf.Name]
+func (c *commandEthtoolMock) stats(intf namespacedInterface) (map[string]uint64, error) {
+	i := c.interfaceMap[intf.Name]
 	if i != nil {
-		return i.Stat, nil
+		return i.stat, nil
+	}
+	return nil, errors.New("interface not found")
+}
+
+func (c *commandEthtoolMock) get(intf namespacedInterface) (map[string]uint64, error) {
+	i := c.interfaceMap[intf.Name]
+	if i != nil {
+		return i.cmdGet, nil
 	}
 	return nil, errors.New("interface not found")
 }
 
 func setup() {
-	interfaceMap = make(map[string]*InterfaceMock)
+	interfaceMap = make(map[string]*interfaceMock)
 
 	eth1Stat := map[string]uint64{
 		"interface_up":                   1,
@@ -219,8 +232,14 @@ func setup() {
 		"tx_tso_fallbacks":               0,
 		"tx_tso_long_headers":            0,
 	}
-	eth1 := &InterfaceMock{"eth1", "driver1", "", eth1Stat, false, true}
-	interfaceMap[eth1.Name] = eth1
+	eth1Get := map[string]uint64{
+		"autoneg": 1,
+		"duplex":  1,
+		"link":    1,
+		"speed":   1000,
+	}
+	eth1 := &interfaceMock{"eth1", "driver1", "", eth1Stat, false, true, eth1Get}
+	interfaceMap[eth1.name] = eth1
 
 	eth2Stat := map[string]uint64{
 		"interface_up":                   0,
@@ -321,8 +340,14 @@ func setup() {
 		"tx_tso_fallbacks":               0,
 		"tx_tso_long_headers":            0,
 	}
-	eth2 := &InterfaceMock{"eth2", "driver1", "", eth2Stat, false, false}
-	interfaceMap[eth2.Name] = eth2
+	eth2Get := map[string]uint64{
+		"autoneg": 0,
+		"duplex":  255,
+		"link":    0,
+		"speed":   9223372036854775807,
+	}
+	eth2 := &interfaceMock{"eth2", "driver1", "", eth2Stat, false, false, eth2Get}
+	interfaceMap[eth2.name] = eth2
 
 	eth3Stat := map[string]uint64{
 		"interface_up":                   1,
@@ -423,8 +448,14 @@ func setup() {
 		"tx_tso_fallbacks":               0,
 		"tx_tso_long_headers":            0,
 	}
-	eth3 := &InterfaceMock{"eth3", "driver1", "namespace1", eth3Stat, false, true}
-	interfaceMap[eth3.Name] = eth3
+	eth3Get := map[string]uint64{
+		"autoneg": 1,
+		"duplex":  1,
+		"link":    1,
+		"speed":   1000,
+	}
+	eth3 := &interfaceMock{"eth3", "driver1", "namespace1", eth3Stat, false, true, eth3Get}
+	interfaceMap[eth3.name] = eth3
 
 	eth4Stat := map[string]uint64{
 		"interface_up":                   1,
@@ -525,22 +556,32 @@ func setup() {
 		"tx_tso_fallbacks":               0,
 		"tx_tso_long_headers":            0,
 	}
-	eth4 := &InterfaceMock{"eth4", "driver1", "namespace2", eth4Stat, false, true}
-	interfaceMap[eth4.Name] = eth4
+	eth4Get := map[string]uint64{
+		"autoneg": 1,
+		"duplex":  1,
+		"link":    1,
+		"speed":   100,
+	}
+	eth4 := &interfaceMock{"eth4", "driver1", "namespace2", eth4Stat, false, true, eth4Get}
+	interfaceMap[eth4.name] = eth4
 
 	// dummy loopback including dummy stat to ensure that the ignore feature is working
 	lo0Stat := map[string]uint64{
 		"dummy": 0,
 	}
-	lo0 := &InterfaceMock{"lo0", "", "", lo0Stat, true, true}
-	interfaceMap[lo0.Name] = lo0
+	lo0Get := map[string]uint64{
+		"autoneg": 1,
+		"duplex":  1,
+		"link":    1,
+		"speed":   1000,
+	}
+	lo0 := &interfaceMock{"lo0", "", "", lo0Stat, true, true, lo0Get}
+	interfaceMap[lo0.name] = lo0
 
-	c := &CommandEthtoolMock{interfaceMap}
-	command = &Ethtool{
-		InterfaceInclude: []string{},
-		InterfaceExclude: []string{},
-		DownInterfaces:   "expose",
-		command:          c,
+	c := &commandEthtoolMock{interfaceMap}
+	eth = &Ethtool{
+		DownInterfaces: "expose",
+		command:        c,
 	}
 }
 
@@ -564,15 +605,18 @@ func toStringMapUint(in map[string]interface{}) map[string]uint64 {
 func TestGather(t *testing.T) {
 	setup()
 
-	err := command.Init()
+	err := eth.Init()
 	require.NoError(t, err)
 
 	var acc testutil.Accumulator
-	err = command.Gather(&acc)
+	err = eth.Gather(&acc)
 	require.NoError(t, err)
 	require.Len(t, acc.Metrics, 2)
 
-	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].Stat)
+	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].stat)
+	for k, v := range interfaceMap["eth1"].cmdGet {
+		expectedFieldsEth1[k] = v
+	}
 	expectedFieldsEth1["interface_up_counter"] = expectedFieldsEth1["interface_up"]
 	expectedFieldsEth1["interface_up"] = true
 
@@ -582,7 +626,11 @@ func TestGather(t *testing.T) {
 		"namespace": "",
 	}
 	acc.AssertContainsTaggedFields(t, pluginName, expectedFieldsEth1, expectedTagsEth1)
-	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].Stat)
+
+	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].stat)
+	for k, v := range interfaceMap["eth2"].cmdGet {
+		expectedFieldsEth2[k] = v
+	}
 	expectedFieldsEth2["interface_up_counter"] = expectedFieldsEth2["interface_up"]
 	expectedFieldsEth2["interface_up"] = false
 	expectedTagsEth2 := map[string]string{
@@ -596,18 +644,21 @@ func TestGather(t *testing.T) {
 func TestGatherIncludeInterfaces(t *testing.T) {
 	setup()
 
-	command.InterfaceInclude = append(command.InterfaceInclude, "eth1")
+	eth.InterfaceInclude = append(eth.InterfaceInclude, "eth1")
 
-	err := command.Init()
+	err := eth.Init()
 	require.NoError(t, err)
 
 	var acc testutil.Accumulator
-	err = command.Gather(&acc)
+	err = eth.Gather(&acc)
 	require.NoError(t, err)
 	require.Len(t, acc.Metrics, 1)
 
 	// Should contain eth1
-	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].Stat)
+	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].stat)
+	for k, v := range interfaceMap["eth1"].cmdGet {
+		expectedFieldsEth1[k] = v
+	}
 	expectedFieldsEth1["interface_up_counter"] = expectedFieldsEth1["interface_up"]
 	expectedFieldsEth1["interface_up"] = true
 	expectedTagsEth1 := map[string]string{
@@ -618,7 +669,10 @@ func TestGatherIncludeInterfaces(t *testing.T) {
 	acc.AssertContainsTaggedFields(t, pluginName, expectedFieldsEth1, expectedTagsEth1)
 
 	// Should not contain eth2
-	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].Stat)
+	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].stat)
+	for k, v := range interfaceMap["eth2"].cmdGet {
+		expectedFieldsEth2[k] = v
+	}
 	expectedFieldsEth2["interface_up_counter"] = expectedFieldsEth2["interface_up"]
 	expectedFieldsEth2["interface_up"] = false
 	expectedTagsEth2 := map[string]string{
@@ -632,18 +686,21 @@ func TestGatherIncludeInterfaces(t *testing.T) {
 func TestGatherIgnoreInterfaces(t *testing.T) {
 	setup()
 
-	command.InterfaceExclude = append(command.InterfaceExclude, "eth1")
+	eth.InterfaceExclude = append(eth.InterfaceExclude, "eth1")
 
-	err := command.Init()
+	err := eth.Init()
 	require.NoError(t, err)
 
 	var acc testutil.Accumulator
-	err = command.Gather(&acc)
+	err = eth.Gather(&acc)
 	require.NoError(t, err)
 	require.Len(t, acc.Metrics, 1)
 
 	// Should not contain eth1
-	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].Stat)
+	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].stat)
+	for k, v := range interfaceMap["eth1"].cmdGet {
+		expectedFieldsEth1[k] = v
+	}
 	expectedFieldsEth1["interface_up_counter"] = expectedFieldsEth1["interface_up"]
 	expectedFieldsEth1["interface_up"] = true
 	expectedTagsEth1 := map[string]string{
@@ -654,7 +711,10 @@ func TestGatherIgnoreInterfaces(t *testing.T) {
 	acc.AssertDoesNotContainsTaggedFields(t, pluginName, expectedFieldsEth1, expectedTagsEth1)
 
 	// Should contain eth2
-	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].Stat)
+	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].stat)
+	for k, v := range interfaceMap["eth2"].cmdGet {
+		expectedFieldsEth2[k] = v
+	}
 	expectedFieldsEth2["interface_up_counter"] = expectedFieldsEth2["interface_up"]
 	expectedFieldsEth2["interface_up"] = false
 	expectedTagsEth2 := map[string]string{
@@ -668,17 +728,20 @@ func TestGatherIgnoreInterfaces(t *testing.T) {
 func TestSkipMetricsForInterfaceDown(t *testing.T) {
 	setup()
 
-	command.DownInterfaces = "skip"
+	eth.DownInterfaces = "skip"
 
-	err := command.Init()
+	err := eth.Init()
 	require.NoError(t, err)
 
 	var acc testutil.Accumulator
-	err = command.Gather(&acc)
+	err = eth.Gather(&acc)
 	require.NoError(t, err)
 	require.Len(t, acc.Metrics, 1)
 
-	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].Stat)
+	expectedFieldsEth1 := toStringMapInterface(interfaceMap["eth1"].stat)
+	for k, v := range interfaceMap["eth1"].cmdGet {
+		expectedFieldsEth1[k] = v
+	}
 	expectedFieldsEth1["interface_up_counter"] = expectedFieldsEth1["interface_up"]
 	expectedFieldsEth1["interface_up"] = true
 
@@ -694,17 +757,20 @@ func TestGatherIncludeNamespaces(t *testing.T) {
 	setup()
 	var acc testutil.Accumulator
 
-	command.NamespaceInclude = append(command.NamespaceInclude, "namespace1")
+	eth.NamespaceInclude = append(eth.NamespaceInclude, "namespace1")
 
-	err := command.Init()
+	err := eth.Init()
 	require.NoError(t, err)
 
-	err = command.Gather(&acc)
+	err = eth.Gather(&acc)
 	require.NoError(t, err)
 	require.Len(t, acc.Metrics, 1)
 
 	// Should contain eth3
-	expectedFieldsEth3 := toStringMapInterface(interfaceMap["eth3"].Stat)
+	expectedFieldsEth3 := toStringMapInterface(interfaceMap["eth3"].stat)
+	for k, v := range interfaceMap["eth3"].cmdGet {
+		expectedFieldsEth3[k] = v
+	}
 	expectedFieldsEth3["interface_up_counter"] = expectedFieldsEth3["interface_up"]
 	expectedFieldsEth3["interface_up"] = true
 	expectedTagsEth3 := map[string]string{
@@ -715,7 +781,10 @@ func TestGatherIncludeNamespaces(t *testing.T) {
 	acc.AssertContainsTaggedFields(t, pluginName, expectedFieldsEth3, expectedTagsEth3)
 
 	// Should not contain eth2
-	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].Stat)
+	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].stat)
+	for k, v := range interfaceMap["eth2"].cmdGet {
+		expectedFieldsEth2[k] = v
+	}
 	expectedFieldsEth2["interface_up_counter"] = expectedFieldsEth2["interface_up"]
 	expectedFieldsEth2["interface_up"] = false
 	expectedTagsEth2 := map[string]string{
@@ -730,17 +799,20 @@ func TestGatherIgnoreNamespaces(t *testing.T) {
 	setup()
 	var acc testutil.Accumulator
 
-	command.NamespaceExclude = append(command.NamespaceExclude, "namespace2")
+	eth.NamespaceExclude = append(eth.NamespaceExclude, "namespace2")
 
-	err := command.Init()
+	err := eth.Init()
 	require.NoError(t, err)
 
-	err = command.Gather(&acc)
+	err = eth.Gather(&acc)
 	require.NoError(t, err)
 	require.Len(t, acc.Metrics, 3)
 
 	// Should not contain eth4
-	expectedFieldsEth4 := toStringMapInterface(interfaceMap["eth4"].Stat)
+	expectedFieldsEth4 := toStringMapInterface(interfaceMap["eth4"].stat)
+	for k, v := range interfaceMap["eth4"].cmdGet {
+		expectedFieldsEth4[k] = v
+	}
 	expectedFieldsEth4["interface_up_counter"] = expectedFieldsEth4["interface_up"]
 	expectedFieldsEth4["interface_up"] = true
 	expectedTagsEth4 := map[string]string{
@@ -751,7 +823,10 @@ func TestGatherIgnoreNamespaces(t *testing.T) {
 	acc.AssertDoesNotContainsTaggedFields(t, pluginName, expectedFieldsEth4, expectedTagsEth4)
 
 	// Should contain eth2
-	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].Stat)
+	expectedFieldsEth2 := toStringMapInterface(interfaceMap["eth2"].stat)
+	for k, v := range interfaceMap["eth2"].cmdGet {
+		expectedFieldsEth2[k] = v
+	}
 	expectedFieldsEth2["interface_up_counter"] = expectedFieldsEth2["interface_up"]
 	expectedFieldsEth2["interface_up"] = false
 	expectedTagsEth2 := map[string]string{
@@ -762,7 +837,10 @@ func TestGatherIgnoreNamespaces(t *testing.T) {
 	acc.AssertContainsTaggedFields(t, pluginName, expectedFieldsEth2, expectedTagsEth2)
 
 	// Should contain eth3
-	expectedFieldsEth3 := toStringMapInterface(interfaceMap["eth3"].Stat)
+	expectedFieldsEth3 := toStringMapInterface(interfaceMap["eth3"].stat)
+	for k, v := range interfaceMap["eth3"].cmdGet {
+		expectedFieldsEth3[k] = v
+	}
 	expectedFieldsEth3["interface_up_counter"] = expectedFieldsEth3["interface_up"]
 	expectedFieldsEth3["interface_up"] = true
 	expectedTagsEth3 := map[string]string{
@@ -773,14 +851,14 @@ func TestGatherIgnoreNamespaces(t *testing.T) {
 	acc.AssertContainsTaggedFields(t, pluginName, expectedFieldsEth3, expectedTagsEth3)
 }
 
-type TestCase struct {
+type testCase struct {
 	normalization  []string
 	stats          map[string]interface{}
 	expectedFields map[string]interface{}
 }
 
 func TestNormalizedKeys(t *testing.T) {
-	cases := []TestCase{
+	cases := []testCase{
 		{
 			normalization: []string{"underscore"},
 			stats: map[string]interface{}{
@@ -852,7 +930,6 @@ func TestNormalizedKeys(t *testing.T) {
 			},
 		},
 		{
-			normalization: []string{},
 			stats: map[string]interface{}{
 				"  Port RX ":   uint64(1),
 				" Port_tx":     uint64(0),
@@ -866,7 +943,6 @@ func TestNormalizedKeys(t *testing.T) {
 			},
 		},
 		{
-			normalization: []string{},
 			stats: map[string]interface{}{
 				"  Port RX ": uint64(1),
 				" Port_tx":   uint64(0),
@@ -880,29 +956,27 @@ func TestNormalizedKeys(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		eth0 := &InterfaceMock{"eth0", "e1000e", "", toStringMapUint(c.stats), false, true}
+		eth0 := &interfaceMock{"eth0", "e1000e", "", toStringMapUint(c.stats), false, true, map[string]uint64{}}
 		expectedTags := map[string]string{
-			"interface": eth0.Name,
-			"driver":    eth0.DriverName,
+			"interface": eth0.name,
+			"driver":    eth0.driverName,
 			"namespace": "",
 		}
 
-		interfaceMap = make(map[string]*InterfaceMock)
-		interfaceMap[eth0.Name] = eth0
+		interfaceMap = make(map[string]*interfaceMock)
+		interfaceMap[eth0.name] = eth0
 
-		cmd := &CommandEthtoolMock{interfaceMap}
-		command = &Ethtool{
-			InterfaceInclude: []string{},
-			InterfaceExclude: []string{},
-			NormalizeKeys:    c.normalization,
-			command:          cmd,
+		cmd := &commandEthtoolMock{interfaceMap}
+		eth = &Ethtool{
+			NormalizeKeys: c.normalization,
+			command:       cmd,
 		}
 
-		err := command.Init()
+		err := eth.Init()
 		require.NoError(t, err)
 
 		var acc testutil.Accumulator
-		err = command.Gather(&acc)
+		err = eth.Gather(&acc)
 
 		require.NoError(t, err)
 		require.Len(t, acc.Metrics, 1)
