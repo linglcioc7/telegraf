@@ -1,15 +1,12 @@
 //go:build windows
 
-// Package win_eventlog Input plugin to collect Windows Event Log messages
-//
-//revive:disable-next-line:var-naming
 package win_eventlog
 
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -18,11 +15,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// DecodeUTF16 to UTF8 bytes
-func DecodeUTF16(b []byte) ([]byte, error) {
-
+// decodeUTF16 to UTF8 bytes
+func decodeUTF16(b []byte) ([]byte, error) {
 	if len(b)%2 != 0 {
-		return nil, fmt.Errorf("must have even length byte slice")
+		return nil, errors.New("must have even length byte slice")
 	}
 
 	u16s := make([]uint16, 1)
@@ -42,29 +38,29 @@ func DecodeUTF16(b []byte) ([]byte, error) {
 	return ret.Bytes(), nil
 }
 
-// GetFromSnapProcess finds information about process by the given pid
-// Returns process parent pid, threads info handle and process name
-func GetFromSnapProcess(pid uint32) (uint32, uint32, string, error) {
-	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, uint32(pid))
+// getFromSnapProcess finds information about process by the given pid
+// Returns process name
+func getFromSnapProcess(pid uint32) (string, error) {
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, pid)
 	if err != nil {
-		return 0, 0, "", err
+		return "", err
 	}
 	defer windows.CloseHandle(snap)
 	var pe32 windows.ProcessEntry32
 	pe32.Size = uint32(unsafe.Sizeof(pe32))
-	if err = windows.Process32First(snap, &pe32); err != nil {
-		return 0, 0, "", err
+	if err := windows.Process32First(snap, &pe32); err != nil {
+		return "", err
 	}
 	for {
-		if pe32.ProcessID == uint32(pid) {
+		if pe32.ProcessID == pid {
 			szexe := windows.UTF16ToString(pe32.ExeFile[:])
-			return uint32(pe32.ParentProcessID), uint32(pe32.Threads), szexe, nil
+			return szexe, nil
 		}
 		if err = windows.Process32Next(snap, &pe32); err != nil {
 			break
 		}
 	}
-	return 0, 0, "", fmt.Errorf("couldn't find pid: %d", pid)
+	return "", fmt.Errorf("couldn't find pid: %d", pid)
 }
 
 type xmlnode struct {
@@ -75,8 +71,8 @@ type xmlnode struct {
 	Nodes   []xmlnode  `xml:",any"`
 }
 
-// EventField for unique rendering
-type EventField struct {
+// eventField for unique rendering
+type eventField struct {
 	Name  string
 	Value string
 }
@@ -89,27 +85,25 @@ func (n *xmlnode) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return d.DecodeElement((*node)(n), &start)
 }
 
-// UnrollXMLFields extracts fields from xml data
-func UnrollXMLFields(data []byte, fieldsUsage map[string]int, separator string) ([]EventField, map[string]int) {
+// unrollXMLFields extracts fields from xml data
+func unrollXMLFields(data []byte, fieldsUsage map[string]int, separator string) ([]eventField, map[string]int) {
 	buf := bytes.NewBuffer(data)
 	dec := xml.NewDecoder(buf)
-	var fields []EventField
+	var fields []eventField
 	for {
 		var node xmlnode
 		err := dec.Decode(&node)
-		if err == io.EOF {
-			break
-		}
 		if err != nil {
 			break
 		}
+
 		var parents []string
 		walkXML([]xmlnode{node}, parents, separator, func(node xmlnode, parents []string, separator string) bool {
 			innerText := strings.TrimSpace(node.Text)
 			if len(innerText) > 0 {
 				valueName := strings.Join(parents, separator)
 				fieldsUsage[valueName]++
-				field := EventField{Name: valueName, Value: innerText}
+				field := eventField{Name: valueName, Value: innerText}
 				fields = append(fields, field)
 			}
 			return true
@@ -135,18 +129,17 @@ func walkXML(nodes []xmlnode, parents []string, separator string, f func(xmlnode
 	}
 }
 
-// UniqueFieldNames forms unique field names
-// by adding _<num> if there are several of them
-func UniqueFieldNames(fields []EventField, fieldsUsage map[string]int, separator string) []EventField {
-	var fieldsCounter = map[string]int{}
-	var fieldsUnique []EventField
+// uniqueFieldNames forms unique field names by adding _<num> if there are several of them
+func uniqueFieldNames(fields []eventField, fieldsUsage map[string]int, separator string) []eventField {
+	var fieldsCounter = make(map[string]int, len(fields))
+	fieldsUnique := make([]eventField, 0, len(fields))
 	for _, field := range fields {
 		fieldName := field.Name
 		if fieldsUsage[field.Name] > 1 {
 			fieldsCounter[field.Name]++
 			fieldName = fmt.Sprint(field.Name, separator, fieldsCounter[field.Name])
 		}
-		fieldsUnique = append(fieldsUnique, EventField{
+		fieldsUnique = append(fieldsUnique, eventField{
 			Name:  fieldName,
 			Value: field.Value,
 		})

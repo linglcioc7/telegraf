@@ -1,17 +1,27 @@
 package kubernetes
 
-type Pods struct {
+type pods struct {
 	Kind       string `json:"kind"`
 	APIVersion string `json:"apiVersion"`
-	Items      []Item `json:"items"`
+	Items      []item `json:"items"`
 }
 
-type Item struct {
-	Metadata Metadata `json:"metadata"`
+type item struct {
+	Metadata metadata `json:"metadata"`
+	Spec     spec     `json:"spec"`
 }
 
-type Metadata struct {
+type metadata struct {
 	Name      string            `json:"name"`
 	Namespace string            `json:"namespace"`
 	Labels    map[string]string `json:"labels"`
+}
+
+type spec struct {
+	Containers []container `json:"containers"`
+}
+
+type container struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
 }

@@ -19,21 +19,22 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
-type protocolDecoder interface {
-	Init() error
-	Decode(net.IP, []byte) ([]telegraf.Metric, error)
-}
-
 type NetFlow struct {
 	ServiceAddress string          `toml:"service_address"`
 	ReadBufferSize config.Size     `toml:"read_buffer_size"`
 	Protocol       string          `toml:"protocol"`
-	DumpPackets    bool            `toml:"dump_packets"`
+	DumpPackets    bool            `toml:"dump_packets" deprecated:"1.35.0;use 'log_level' 'trace' instead"`
+	PENFiles       []string        `toml:"private_enterprise_number_files"`
 	Log            telegraf.Logger `toml:"-"`
 
 	conn    *net.UDPConn
 	decoder protocolDecoder
 	wg      sync.WaitGroup
+}
+
+type protocolDecoder interface {
+	init() error
+	decode(net.IP, []byte) ([]telegraf.Metric, error)
 }
 
 func (*NetFlow) SampleConfig() string {
@@ -55,14 +56,30 @@ func (n *NetFlow) Init() error {
 	}
 
 	switch strings.ToLower(n.Protocol) {
-	case "", "netflow v9", "ipfix":
-		n.decoder = &netflowDecoder{Log: n.Log}
+	case "netflow v9":
+		if len(n.PENFiles) != 0 {
+			n.Log.Warn("'private_enterprise_number_files' option will be ignored in 'netflow v9'")
+		}
+		n.decoder = &netflowDecoder{
+			log: n.Log,
+		}
+	case "", "ipfix":
+		n.decoder = &netflowDecoder{
+			penFiles: n.PENFiles,
+			log:      n.Log,
+		}
 	case "netflow v5":
+		if len(n.PENFiles) != 0 {
+			n.Log.Warn("'private_enterprise_number_files' option will be ignored in 'netflow v5'")
+		}
 		n.decoder = &netflowv5Decoder{}
+	case "sflow", "sflow v5":
+		n.decoder = &sflowv5Decoder{log: n.Log}
 	default:
-		return fmt.Errorf("invalid protocol %q, only supports 'netflow v5', 'netflow v9' and 'ipfix'", n.Protocol)
+		return fmt.Errorf("invalid protocol %q, only supports 'sflow', 'netflow v5', 'netflow v9' and 'ipfix'", n.Protocol)
 	}
-	return n.decoder.Init()
+
+	return n.decoder.init()
 }
 
 func (n *NetFlow) Start(acc telegraf.Accumulator) error {
@@ -97,6 +114,10 @@ func (n *NetFlow) Start(acc telegraf.Accumulator) error {
 	return nil
 }
 
+func (*NetFlow) Gather(telegraf.Accumulator) error {
+	return nil
+}
+
 func (n *NetFlow) Stop() {
 	if n.conn != nil {
 		_ = n.conn.Close()
@@ -118,22 +139,19 @@ func (n *NetFlow) read(acc telegraf.Accumulator) {
 		if count < 1 {
 			continue
 		}
-		if n.DumpPackets {
-			n.Log.Debugf("raw data: %s", hex.EncodeToString(buf[:count]))
+		if n.Log.Level().Includes(telegraf.Trace) || n.DumpPackets { // for backward compatibility
+			n.Log.Tracef("raw data: %s", hex.EncodeToString(buf[:count]))
 		}
-		metrics, err := n.decoder.Decode(src.IP, buf[:count])
+		metrics, err := n.decoder.decode(src.IP, buf[:count])
 		if err != nil {
-			acc.AddError(err)
+			errWithData := fmt.Errorf("%w; raw data: %s", err, hex.EncodeToString(buf[:count]))
+			acc.AddError(errWithData)
 			continue
 		}
 		for _, m := range metrics {
 			acc.AddMetric(m)
 		}
 	}
-}
-
-func (n *NetFlow) Gather(_ telegraf.Accumulator) error {
-	return nil
 }
 
 // Register the plugin

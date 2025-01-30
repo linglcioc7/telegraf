@@ -62,16 +62,16 @@ details.
   ## To add paths when translating with netsnmp, use the MIBDIRS environment variable
   # path = ["/usr/share/snmp/mibs"]
   ##
-  ## Deprecated in 1.20.0; no longer running snmptranslate
   ## Timeout running snmptranslate command
+  ## Used by the netsnmp translator only
   # timeout = "5s"
-  ## Snmp version
+  ## Snmp version; one of "1", "2c" or "3".
   # version = "2c"
   ## SNMPv3 authentication and encryption options.
   ##
   ## Security Name.
   # sec_name = "myuser"
-  ## Authentication protocol; one of "MD5", "SHA" or "".
+  ## Authentication protocol; one of "MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512" or "".
   # auth_protocol = "MD5"
   ## Authentication password.
   # auth_password = "pass"
@@ -127,7 +127,7 @@ On Mac OS, listening on privileged ports is unrestricted on versions
 
 ## Example Output
 
-```shell
+```text
 snmp_trap,mib=SNMPv2-MIB,name=coldStart,oid=.1.3.6.1.6.3.1.1.5.1,source=192.168.122.102,version=2c,community=public snmpTrapEnterprise.0="linux",sysUpTimeInstance=1i 1574109187723429814
 snmp_trap,mib=NET-SNMP-AGENT-MIB,name=nsNotifyShutdown,oid=.1.3.6.1.4.1.8072.4.0.2,source=192.168.122.102,version=2c,community=public sysUpTimeInstance=5803i,snmpTrapEnterprise.0="netSnmpNotificationPrefix" 1574109186555115459
 ```

@@ -16,19 +16,20 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/agent"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/plugins/serializers/influx"
 )
 
-type empty struct{}
-
 var (
 	envVarEscaper = strings.NewReplacer(
 		`"`, `\"`,
 		`\`, `\\`,
 	)
+	oldpkg = "github.com/influxdata/telegraf/plugins/inputs/execd/shim"
+	newpkg = "github.com/influxdata/telegraf/plugins/common/shim"
 )
 
 const (
@@ -49,10 +50,7 @@ type Shim struct {
 	stderr io.Writer
 }
 
-var (
-	oldpkg = "github.com/influxdata/telegraf/plugins/inputs/execd/shim"
-	newpkg = "github.com/influxdata/telegraf/plugins/common/shim"
-)
+type empty struct{}
 
 // New creates a new shim interface
 func New() *Shim {
@@ -69,7 +67,7 @@ func (s *Shim) AddInput(input telegraf.Input) error {
 	if p, ok := input.(telegraf.Initializer); ok {
 		err := p.Init()
 		if err != nil {
-			return fmt.Errorf("failed to init input: %s", err)
+			return fmt.Errorf("failed to init input: %w", err)
 		}
 	}
 
@@ -103,7 +101,10 @@ func (s *Shim) Run(pollInterval time.Duration) error {
 	collectMetricsPrompt := make(chan os.Signal, 1)
 	listenForCollectMetricsSignals(ctx, collectMetricsPrompt)
 
-	serializer := influx.NewSerializer()
+	serializer := &influx.Serializer{}
+	if err := serializer.Init(); err != nil {
+		return fmt.Errorf("creating serializer failed: %w", err)
+	}
 
 	for _, input := range s.Inputs {
 		wrappedInput := inputShim{Input: input}
@@ -113,7 +114,7 @@ func (s *Shim) Run(pollInterval time.Duration) error {
 
 		if serviceInput, ok := input.(telegraf.ServiceInput); ok {
 			if err := serviceInput.Start(acc); err != nil {
-				return fmt.Errorf("failed to start input: %s", err)
+				return fmt.Errorf("failed to start input: %w", err)
 			}
 		}
 		gatherPromptCh := make(chan empty, 1)
@@ -150,16 +151,60 @@ loop:
 			}
 			b, err := serializer.Serialize(m)
 			if err != nil {
-				return fmt.Errorf("failed to serialize metric: %s", err)
+				return fmt.Errorf("failed to serialize metric: %w", err)
 			}
 			// Write this to stdout
 			if _, err := fmt.Fprint(s.stdout, string(b)); err != nil {
-				return fmt.Errorf("failed to write %q to stdout: %s", string(b), err)
+				return fmt.Errorf("failed to write %q to stdout: %w", string(b), err)
 			}
 		}
 	}
 
 	return nil
+}
+
+// LoadConfig loads and adds the inputs to the shim
+func (s *Shim) LoadConfig(filePath *string) error {
+	loadedInputs, err := LoadConfig(filePath)
+	if err != nil {
+		return err
+	}
+	return s.AddInputs(loadedInputs)
+}
+
+// DefaultImportedPlugins defaults to whatever plugins happen to be loaded and
+// have registered themselves with the registry. This makes loading plugins
+// without having to define a config dead easy.
+func DefaultImportedPlugins() (i []telegraf.Input, e error) {
+	for _, inputCreatorFunc := range inputs.Inputs {
+		i = append(i, inputCreatorFunc())
+	}
+	return i, nil
+}
+
+// LoadConfig loads the config and returns inputs that later need to be loaded.
+func LoadConfig(filePath *string) ([]telegraf.Input, error) {
+	if filePath == nil || *filePath == "" {
+		return DefaultImportedPlugins()
+	}
+
+	b, err := os.ReadFile(*filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	s := expandEnvVars(b)
+
+	conf := struct {
+		Inputs map[string][]toml.Primitive
+	}{}
+
+	md, err := toml.Decode(s, &conf)
+	if err != nil {
+		return nil, err
+	}
+
+	return loadConfigIntoInputs(md, conf.Inputs)
 }
 
 func hasQuit(ctx context.Context) bool {
@@ -248,50 +293,6 @@ func (s *Shim) startGathering(ctx context.Context, input telegraf.Input, acc tel
 	}
 }
 
-// LoadConfig loads and adds the inputs to the shim
-func (s *Shim) LoadConfig(filePath *string) error {
-	loadedInputs, err := LoadConfig(filePath)
-	if err != nil {
-		return err
-	}
-	return s.AddInputs(loadedInputs)
-}
-
-// DefaultImportedPlugins defaults to whatever plugins happen to be loaded and
-// have registered themselves with the registry. This makes loading plugins
-// without having to define a config dead easy.
-func DefaultImportedPlugins() (i []telegraf.Input, e error) {
-	for _, inputCreatorFunc := range inputs.Inputs {
-		i = append(i, inputCreatorFunc())
-	}
-	return i, nil
-}
-
-// LoadConfig loads the config and returns inputs that later need to be loaded.
-func LoadConfig(filePath *string) ([]telegraf.Input, error) {
-	if filePath == nil || *filePath == "" {
-		return DefaultImportedPlugins()
-	}
-
-	b, err := os.ReadFile(*filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	s := expandEnvVars(b)
-
-	conf := struct {
-		Inputs map[string][]toml.Primitive
-	}{}
-
-	md, err := toml.Decode(s, &conf)
-	if err != nil {
-		return nil, err
-	}
-
-	return loadConfigIntoInputs(md, conf.Inputs)
-}
-
 func expandEnvVars(contents []byte) string {
 	return os.Expand(string(contents), getEnv)
 }
@@ -303,8 +304,7 @@ func getEnv(key string) string {
 }
 
 func loadConfigIntoInputs(md toml.MetaData, inputConfigs map[string][]toml.Primitive) ([]telegraf.Input, error) {
-	renderedInputs := []telegraf.Input{}
-
+	renderedInputs := make([]telegraf.Input, 0, len(inputConfigs))
 	for name, primitives := range inputConfigs {
 		inputCreator, ok := inputs.Inputs[name]
 		if !ok {

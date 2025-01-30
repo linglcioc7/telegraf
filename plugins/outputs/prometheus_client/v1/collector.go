@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
-	serializer "github.com/influxdata/telegraf/plugins/serializers/prometheus"
+	serializers_prometheus "github.com/influxdata/telegraf/plugins/serializers/prometheus"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -54,6 +54,7 @@ type Collector struct {
 	ExpirationInterval time.Duration
 	StringAsLabel      bool
 	ExportTimestamp    bool
+	TypeMapping        serializers_prometheus.MetricTypes
 	Log                telegraf.Logger
 
 	sync.Mutex
@@ -61,11 +62,13 @@ type Collector struct {
 	expireTicker *time.Ticker
 }
 
-func NewCollector(expire time.Duration, stringsAsLabel bool, logger telegraf.Logger) *Collector {
+func NewCollector(expire time.Duration, stringsAsLabel, exportTimestamp bool, typeMapping serializers_prometheus.MetricTypes, log telegraf.Logger) *Collector {
 	c := &Collector{
 		ExpirationInterval: expire,
 		StringAsLabel:      stringsAsLabel,
-		Log:                logger,
+		ExportTimestamp:    exportTimestamp,
+		TypeMapping:        typeMapping,
+		Log:                log,
 		fam:                make(map[string]*MetricFamily),
 	}
 
@@ -82,16 +85,22 @@ func NewCollector(expire time.Duration, stringsAsLabel bool, logger telegraf.Log
 	return c
 }
 
-func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
+func (*Collector) Describe(ch chan<- *prometheus.Desc) {
 	prometheus.NewGauge(prometheus.GaugeOpts{Name: "Dummy", Help: "Dummy"}).Describe(ch)
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+	// Expire metrics, doing this on Collect ensure metrics are removed even if no
+	// new metrics are added to the output.
+	if c.ExpirationInterval != 0 {
+		c.Expire(time.Now())
+	}
+
 	c.Lock()
 	defer c.Unlock()
 
 	for name, family := range c.fam {
-		// Get list of all labels on MetricFamily
+		// Get list of all labels on metricFamily
 		var labelNames []string
 		for k, v := range family.LabelSet {
 			if v > 0 {
@@ -175,9 +184,10 @@ func (c *Collector) addMetricFamily(point telegraf.Metric, sample *Sample, mname
 	var fam *MetricFamily
 	var ok bool
 	if fam, ok = c.fam[mname]; !ok {
+		pointType := c.TypeMapping.DetermineType(mname, point)
 		fam = &MetricFamily{
 			Samples:           make(map[SampleID]*Sample),
-			TelegrafValueType: point.Type(),
+			TelegrafValueType: pointType,
 			LabelSet:          make(map[string]int),
 		}
 		c.fam[mname] = fam
@@ -201,6 +211,18 @@ func sorted(metrics []telegraf.Metric) []telegraf.Metric {
 }
 
 func (c *Collector) Add(metrics []telegraf.Metric) error {
+	c.addMetrics(metrics)
+
+	// Expire metrics, doing this on Add ensure metrics are removed even if no
+	// new metrics are added to the output.
+	if c.ExpirationInterval != 0 {
+		c.Expire(time.Now())
+	}
+
+	return nil
+}
+
+func (c *Collector) addMetrics(metrics []telegraf.Metric) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -212,7 +234,7 @@ func (c *Collector) Add(metrics []telegraf.Metric) error {
 
 		labels := make(map[string]string)
 		for k, v := range tags {
-			name, ok := serializer.SanitizeLabelName(k)
+			name, ok := serializers_prometheus.SanitizeLabelName(k)
 			if !ok {
 				continue
 			}
@@ -228,7 +250,7 @@ func (c *Collector) Add(metrics []telegraf.Metric) error {
 					continue
 				}
 
-				name, ok := serializer.SanitizeLabelName(fn)
+				name, ok := serializers_prometheus.SanitizeLabelName(fn)
 				if !ok {
 					continue
 				}
@@ -378,7 +400,6 @@ func (c *Collector) Add(metrics []telegraf.Metric) error {
 			}
 		}
 	}
-	return nil
 }
 
 func (c *Collector) Expire(now time.Time) {

@@ -7,10 +7,12 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/plugins/inputs/webhooks/artifactory"
 	"github.com/influxdata/telegraf/plugins/inputs/webhooks/filestack"
@@ -24,71 +26,58 @@ import (
 //go:embed sample.conf
 var sampleConfig string
 
-type Webhook interface {
-	Register(router *mux.Router, acc telegraf.Accumulator, log telegraf.Logger)
-}
-
-func init() {
-	inputs.Add("webhooks", func() telegraf.Input { return NewWebhooks() })
-}
+const (
+	defaultReadTimeout  = 10 * time.Second
+	defaultWriteTimeout = 10 * time.Second
+)
 
 type Webhooks struct {
-	ServiceAddress string `toml:"service_address"`
+	ServiceAddress string          `toml:"service_address"`
+	ReadTimeout    config.Duration `toml:"read_timeout"`
+	WriteTimeout   config.Duration `toml:"write_timeout"`
 
-	Github      *github.GithubWebhook           `toml:"github"`
-	Filestack   *filestack.FilestackWebhook     `toml:"filestack"`
-	Mandrill    *mandrill.MandrillWebhook       `toml:"mandrill"`
-	Rollbar     *rollbar.RollbarWebhook         `toml:"rollbar"`
-	Papertrail  *papertrail.PapertrailWebhook   `toml:"papertrail"`
-	Particle    *particle.ParticleWebhook       `toml:"particle"`
-	Artifactory *artifactory.ArtifactoryWebhook `toml:"artifactory"`
+	Artifactory *artifactory.Webhook `toml:"artifactory"`
+	Filestack   *filestack.Webhook   `toml:"filestack"`
+	Github      *github.Webhook      `toml:"github"`
+	Mandrill    *mandrill.Webhook    `toml:"mandrill"`
+	Papertrail  *papertrail.Webhook  `toml:"papertrail"`
+	Particle    *particle.Webhook    `toml:"particle"`
+	Rollbar     *rollbar.Webhook     `toml:"rollbar"`
 
 	Log telegraf.Logger `toml:"-"`
 
 	srv *http.Server
 }
 
-func NewWebhooks() *Webhooks {
-	return &Webhooks{}
+// Webhook is an interface that all webhooks must implement
+type Webhook interface {
+	// Register registers the webhook with the provided router
+	Register(router *mux.Router, acc telegraf.Accumulator, log telegraf.Logger)
 }
 
 func (*Webhooks) SampleConfig() string {
 	return sampleConfig
 }
 
-func (wb *Webhooks) Gather(_ telegraf.Accumulator) error {
-	return nil
-}
-
-// AvailableWebhooks Looks for fields which implement Webhook interface
-func (wb *Webhooks) AvailableWebhooks() []Webhook {
-	webhooks := make([]Webhook, 0)
-	s := reflect.ValueOf(wb).Elem()
-	for i := 0; i < s.NumField(); i++ {
-		f := s.Field(i)
-
-		if !f.CanInterface() {
-			continue
-		}
-
-		if wbPlugin, ok := f.Interface().(Webhook); ok {
-			if !reflect.ValueOf(wbPlugin).IsNil() {
-				webhooks = append(webhooks, wbPlugin)
-			}
-		}
+func (wb *Webhooks) Start(acc telegraf.Accumulator) error {
+	if wb.ReadTimeout < config.Duration(time.Second) {
+		wb.ReadTimeout = config.Duration(defaultReadTimeout)
+	}
+	if wb.WriteTimeout < config.Duration(time.Second) {
+		wb.WriteTimeout = config.Duration(defaultWriteTimeout)
 	}
 
-	return webhooks
-}
-
-func (wb *Webhooks) Start(acc telegraf.Accumulator) error {
 	r := mux.NewRouter()
 
-	for _, webhook := range wb.AvailableWebhooks() {
+	for _, webhook := range wb.availableWebhooks() {
 		webhook.Register(r, acc, wb.Log)
 	}
 
-	wb.srv = &http.Server{Handler: r}
+	wb.srv = &http.Server{
+		Handler:      r,
+		ReadTimeout:  time.Duration(wb.ReadTimeout),
+		WriteTimeout: time.Duration(wb.WriteTimeout),
+	}
 
 	ln, err := net.Listen("tcp", wb.ServiceAddress)
 	if err != nil {
@@ -108,7 +97,40 @@ func (wb *Webhooks) Start(acc telegraf.Accumulator) error {
 	return nil
 }
 
+func (*Webhooks) Gather(telegraf.Accumulator) error {
+	return nil
+}
+
 func (wb *Webhooks) Stop() {
-	wb.srv.Close() //nolint:revive // Ignore the returned error as we cannot do anything about it anyway
+	wb.srv.Close()
 	wb.Log.Infof("Stopping the Webhooks service")
+}
+
+// availableWebhooks Looks for fields which implement Webhook interface
+func (wb *Webhooks) availableWebhooks() []Webhook {
+	webhooks := make([]Webhook, 0)
+	s := reflect.ValueOf(wb).Elem()
+	for i := 0; i < s.NumField(); i++ {
+		f := s.Field(i)
+
+		if !f.CanInterface() {
+			continue
+		}
+
+		if wbPlugin, ok := f.Interface().(Webhook); ok {
+			if !reflect.ValueOf(wbPlugin).IsNil() {
+				webhooks = append(webhooks, wbPlugin)
+			}
+		}
+	}
+
+	return webhooks
+}
+
+func newWebhooks() *Webhooks {
+	return &Webhooks{}
+}
+
+func init() {
+	inputs.Add("webhooks", func() telegraf.Input { return newWebhooks() })
 }

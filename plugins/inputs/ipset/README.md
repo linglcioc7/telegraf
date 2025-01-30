@@ -65,9 +65,10 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
     ## You can avoid using sudo or root, by setting appropriate privileges for
     ## the telegraf.service systemd service.
     use_sudo = false
+    ## Add number of entries and number of individual IPs (resolve CIDR syntax) for each ipset
+    count_per_ip_entries = false
     ## The default timeout of 1s for ipset execution can be overridden here:
     # timeout = "1s"
-
 ```
 
 ## Metrics
@@ -80,8 +81,6 @@ create myset hash:net family inet hashsize 1024 maxelem 65536 counters comment
 add myset 10.69.152.1 packets 8 bytes 672 comment "machine A"
 ```
 
-```sh
-$ telegraf --config telegraf.conf --input-filter ipset --test --debug
-* Plugin: inputs.ipset, Collection 1
-> ipset,rule=10.69.152.1,host=trashme,set=myset bytes_total=8i,packets_total=672i 1507615028000000000
+```text
+ipset,rule=10.69.152.1,host=trashme,set=myset bytes_total=8i,packets_total=672i 1507615028000000000
 ```

@@ -25,7 +25,7 @@ func TestCompileAndMatch(t *testing.T) {
 	}
 
 	tests := []test{
-		//test super asterisk
+		// test super asterisk
 		{path: filepath.Join(testdataDir, "**"), matches: 7},
 		// test single asterisk
 		{path: filepath.Join(testdataDir, "*.log"), matches: 3},
@@ -42,14 +42,16 @@ func TestCompileAndMatch(t *testing.T) {
 		// test exclamation mark creates non-matching list without a range
 		{path: filepath.Join(testdataDir, "log[!2]*"), matches: 2},
 		// test exclamation mark creates non-matching list without a range
+		//nolint:gocritic // filepathJoin - '\\' used to escape in glob, not path separator
 		{path: filepath.Join(testdataDir, "log\\[!*"), matches: 1},
 		// test exclamation mark creates non-matching list without a range
+		//nolint:gocritic // filepathJoin - '\\' used to escape in glob, not path separator
 		{path: filepath.Join(testdataDir, "log\\[^*"), matches: 0},
 	}
 
 	for _, tc := range tests {
 		g, err := Compile(tc.path)
-		require.Nil(t, err)
+		require.NoError(t, err)
 		matches := g.Match()
 		require.Len(t, matches, tc.matches)
 	}
@@ -67,7 +69,8 @@ func TestRootGlob(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		actual, _ := Compile(test.input)
+		actual, err := Compile(test.input)
+		require.NoError(t, err)
 		require.Equal(t, actual.rootGlob, test.output)
 	}
 }
@@ -82,10 +85,6 @@ func TestFindNestedTextFile(t *testing.T) {
 }
 
 func TestMatch_ErrPermission(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping Unix only test")
-	}
-
 	tests := []struct {
 		input    string
 		expected []string
@@ -103,6 +102,7 @@ func TestMatch_ErrPermission(t *testing.T) {
 }
 
 func TestWindowsSeparator(t *testing.T) {
+	//nolint:staticcheck // Silence linter for now as we plan to reenable tests for Windows later
 	if runtime.GOOS != "windows" {
 		t.Skip("Skipping Windows only test")
 	}

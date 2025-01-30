@@ -18,7 +18,7 @@ import (
 
 // testData is DD wrapper for unit testing of WinServices
 type testData struct {
-	//collection that will be returned in ListServices if service array passed into WinServices constructor is empty
+	// collection that will be returned in listServices if service array passed into WinServices constructor is empty
 	queryServiceList     []string
 	mgrConnectError      error
 	mgrListServicesError error
@@ -39,97 +39,94 @@ type FakeSvcMgr struct {
 	testData testData
 }
 
-func (m *FakeSvcMgr) Disconnect() error {
+func (*FakeSvcMgr) disconnect() error {
 	return nil
 }
 
-func (m *FakeSvcMgr) OpenService(name string) (WinService, error) {
+func (m *FakeSvcMgr) openService(name string) (winService, error) {
 	for _, s := range m.testData.services {
 		if s.serviceName == name {
 			if s.serviceOpenError != nil {
 				return nil, s.serviceOpenError
-			} else {
-				return &FakeWinSvc{s}, nil
 			}
+			return &fakeWinSvc{s}, nil
 		}
 	}
-	return nil, fmt.Errorf("Cannot find service %s", name)
+	return nil, fmt.Errorf("cannot find service %q", name)
 }
 
-func (m *FakeSvcMgr) ListServices() ([]string, error) {
+func (m *FakeSvcMgr) listServices() ([]string, error) {
 	if m.testData.mgrListServicesError != nil {
 		return nil, m.testData.mgrListServicesError
-	} else {
-		return m.testData.queryServiceList, nil
 	}
+	return m.testData.queryServiceList, nil
 }
 
 type FakeMgProvider struct {
 	testData testData
 }
 
-func (m *FakeMgProvider) Connect() (WinServiceManager, error) {
+func (m *FakeMgProvider) connect() (winServiceManager, error) {
 	if m.testData.mgrConnectError != nil {
 		return nil, m.testData.mgrConnectError
-	} else {
-		return &FakeSvcMgr{m.testData}, nil
 	}
+	return &FakeSvcMgr{m.testData}, nil
 }
 
-type FakeWinSvc struct {
+type fakeWinSvc struct {
 	testData serviceTestInfo
 }
 
-func (m *FakeWinSvc) Close() error {
+func (*fakeWinSvc) Close() error {
 	return nil
 }
-func (m *FakeWinSvc) Config() (mgr.Config, error) {
+
+func (m *fakeWinSvc) Config() (mgr.Config, error) {
 	if m.testData.serviceConfigError != nil {
 		return mgr.Config{}, m.testData.serviceConfigError
-	} else {
-		return mgr.Config{
-			ServiceType:      0,
-			StartType:        uint32(m.testData.startUpMode),
-			ErrorControl:     0,
-			BinaryPathName:   "",
-			LoadOrderGroup:   "",
-			TagId:            0,
-			Dependencies:     nil,
-			ServiceStartName: m.testData.serviceName,
-			DisplayName:      m.testData.displayName,
-			Password:         "",
-			Description:      "",
-		}, nil
 	}
+	return mgr.Config{
+		ServiceType:      0,
+		StartType:        uint32(m.testData.startUpMode),
+		ErrorControl:     0,
+		BinaryPathName:   "",
+		LoadOrderGroup:   "",
+		TagId:            0,
+		Dependencies:     nil,
+		ServiceStartName: m.testData.serviceName,
+		DisplayName:      m.testData.displayName,
+		Password:         "",
+		Description:      "",
+	}, nil
 }
-func (m *FakeWinSvc) Query() (svc.Status, error) {
+
+func (m *fakeWinSvc) Query() (svc.Status, error) {
 	if m.testData.serviceQueryError != nil {
 		return svc.Status{}, m.testData.serviceQueryError
-	} else {
-		return svc.Status{
-			State:      svc.State(m.testData.state),
-			Accepts:    0,
-			CheckPoint: 0,
-			WaitHint:   0,
-		}, nil
 	}
+	return svc.Status{
+		State:      svc.State(m.testData.state),
+		Accepts:    0,
+		CheckPoint: 0,
+		WaitHint:   0,
+	}, nil
 }
 
 var testErrors = []testData{
-	{nil, errors.New("Fake mgr connect error"), nil, nil},
-	{nil, nil, errors.New("Fake mgr list services error"), nil},
+	{nil, errors.New("fake mgr connect error"), nil, nil},
+	{nil, nil, errors.New("fake mgr list services error"), nil},
 	{[]string{"Fake service 1", "Fake service 2", "Fake service 3"}, nil, nil, []serviceTestInfo{
-		{errors.New("Fake srv open error"), nil, nil, "Fake service 1", "", 0, 0},
-		{nil, errors.New("Fake srv query error"), nil, "Fake service 2", "", 0, 0},
-		{nil, nil, errors.New("Fake srv config error"), "Fake service 3", "", 0, 0},
+		{errors.New("fake srv open error"), nil, nil, "Fake service 1", "", 0, 0},
+		{nil, errors.New("fake srv query error"), nil, "Fake service 2", "", 0, 0},
+		{nil, nil, errors.New("fake srv config error"), "Fake service 3", "", 0, 0},
 	}},
 	{[]string{"Fake service 1"}, nil, nil, []serviceTestInfo{
-		{errors.New("Fake srv open error"), nil, nil, "Fake service 1", "", 0, 0},
+		{errors.New("fake srv open error"), nil, nil, "Fake service 1", "", 0, 0},
 	}},
 }
 
 func TestMgrErrors(t *testing.T) {
-	//mgr.connect error
+	// mgr.connect error
 	winServices := &WinServices{
 		Log:         testutil.Logger{},
 		mgrProvider: &FakeMgProvider{testErrors[0]},
@@ -139,7 +136,7 @@ func TestMgrErrors(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), testErrors[0].mgrConnectError.Error())
 
-	////mgr.listServices error
+	// mgr.listServices error
 	winServices = &WinServices{
 		Log:         testutil.Logger{},
 		mgrProvider: &FakeMgProvider{testErrors[1]},
@@ -149,15 +146,16 @@ func TestMgrErrors(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), testErrors[1].mgrListServicesError.Error())
 
-	////mgr.listServices error 2
+	// mgr.listServices error 2
 	winServices = &WinServices{
 		Log:          testutil.Logger{},
 		ServiceNames: []string{"Fake service 1"},
 		mgrProvider:  &FakeMgProvider{testErrors[3]},
 	}
-	winServices.Init()
-	var acc3 testutil.Accumulator
+	err = winServices.Init()
+	require.NoError(t, err)
 
+	var acc3 testutil.Accumulator
 	buf := &bytes.Buffer{}
 	log.SetOutput(buf)
 	require.NoError(t, winServices.Gather(&acc3))
@@ -170,18 +168,19 @@ func TestServiceErrors(t *testing.T) {
 		Log:         testutil.Logger{},
 		mgrProvider: &FakeMgProvider{testErrors[2]},
 	}
-	winServices.Init()
-	var acc1 testutil.Accumulator
+	err := winServices.Init()
+	require.NoError(t, err)
 
+	var acc1 testutil.Accumulator
 	buf := &bytes.Buffer{}
 	log.SetOutput(buf)
 	require.NoError(t, winServices.Gather(&acc1))
 
-	//open service error
+	// open service error
 	require.Contains(t, buf.String(), testErrors[2].services[0].serviceOpenError.Error())
-	//query service error
+	// query service error
 	require.Contains(t, buf.String(), testErrors[2].services[1].serviceQueryError.Error())
-	//config service error
+	// config service error
 	require.Contains(t, buf.String(), testErrors[2].services[2].serviceConfigError.Error())
 }
 
@@ -198,16 +197,19 @@ func TestGatherContainsTag(t *testing.T) {
 		ServiceNames: []string{"Service*"},
 		mgrProvider:  &FakeMgProvider{testSimpleData[0]},
 	}
-	winServices.Init()
+
+	err := winServices.Init()
+	require.NoError(t, err)
+
 	var acc1 testutil.Accumulator
 	require.NoError(t, winServices.Gather(&acc1))
-	require.Len(t, acc1.Errors, 0, "There should be no errors after gather")
+	require.Empty(t, acc1.Errors, "There should be no errors after gather")
 
 	for _, s := range testSimpleData[0].services {
 		fields := make(map[string]interface{})
 		tags := make(map[string]string)
-		fields["state"] = int(s.state)
-		fields["startup_mode"] = int(s.startUpMode)
+		fields["state"] = s.state
+		fields["startup_mode"] = s.startUpMode
 		tags["service_name"] = s.serviceName
 		tags["display_name"] = s.displayName
 		acc1.AssertContainsTaggedFields(t, "win_services", fields, tags)
@@ -220,15 +222,17 @@ func TestExcludingNamesTag(t *testing.T) {
 		ServiceNamesExcluded: []string{"Service*"},
 		mgrProvider:          &FakeMgProvider{testSimpleData[0]},
 	}
-	winServices.Init()
+	err := winServices.Init()
+	require.NoError(t, err)
+
 	var acc1 testutil.Accumulator
 	require.NoError(t, winServices.Gather(&acc1))
 
 	for _, s := range testSimpleData[0].services {
 		fields := make(map[string]interface{})
 		tags := make(map[string]string)
-		fields["state"] = int(s.state)
-		fields["startup_mode"] = int(s.startUpMode)
+		fields["state"] = s.state
+		fields["startup_mode"] = s.startUpMode
 		tags["service_name"] = s.serviceName
 		tags["display_name"] = s.displayName
 		acc1.AssertDoesNotContainsTaggedFields(t, "win_services", fields, tags)

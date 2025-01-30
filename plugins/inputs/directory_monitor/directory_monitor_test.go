@@ -10,8 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	"github.com/influxdata/telegraf/plugins/parsers"
 	"github.com/influxdata/telegraf/plugins/parsers/csv"
 	"github.com/influxdata/telegraf/plugins/parsers/json"
 	"github.com/influxdata/telegraf/testutil"
@@ -22,8 +22,6 @@ func TestCreator(t *testing.T) {
 	require.True(t, found)
 
 	expected := &DirectoryMonitor{
-		FilesToMonitor:             defaultFilesToMonitor,
-		FilesToIgnore:              defaultFilesToIgnore,
 		MaxBufferedMetrics:         defaultMaxBufferedMetrics,
 		DirectoryDurationThreshold: defaultDirectoryDurationThreshold,
 		FileQueueSize:              defaultFileQueueSize,
@@ -53,7 +51,7 @@ func TestCSVGZImport(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := csv.Parser{
 			HeaderRowCount: 1,
 		}
@@ -77,7 +75,7 @@ func TestCSVGZImport(t *testing.T) {
 	require.NoError(t, err)
 	err = w.Close()
 	require.NoError(t, err)
-	err = os.WriteFile(filepath.Join(processDirectory, testCsvGzFile), b.Bytes(), 0666)
+	err = os.WriteFile(filepath.Join(processDirectory, testCsvGzFile), b.Bytes(), 0640)
 	require.NoError(t, err)
 
 	// Start plugin before adding file.
@@ -89,7 +87,7 @@ func TestCSVGZImport(t *testing.T) {
 	r.Stop()
 
 	// Verify that we read both files once.
-	require.Equal(t, len(acc.Metrics), 6)
+	require.Len(t, acc.Metrics, 6)
 
 	// File should have gone back to the test directory, as we configured.
 	_, err = os.Stat(filepath.Join(finishedDirectory, testCsvFile))
@@ -119,7 +117,7 @@ func TestCSVGZImportWithHeader(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := csv.Parser{
 			HeaderRowCount: 1,
 			SkipRows:       1,
@@ -148,7 +146,7 @@ func TestCSVGZImportWithHeader(t *testing.T) {
 	require.NoError(t, err)
 	err = w.Close()
 	require.NoError(t, err)
-	err = os.WriteFile(filepath.Join(processDirectory, testCsvGzFile), b.Bytes(), 0666)
+	err = os.WriteFile(filepath.Join(processDirectory, testCsvGzFile), b.Bytes(), 0640)
 	require.NoError(t, err)
 
 	// Start plugin before adding file.
@@ -160,7 +158,7 @@ func TestCSVGZImportWithHeader(t *testing.T) {
 	r.Stop()
 
 	// Verify that we read both files once.
-	require.Equal(t, len(acc.Metrics), 6)
+	require.Len(t, acc.Metrics, 6)
 
 	// File should have gone back to the test directory, as we configured.
 	_, err = os.Stat(filepath.Join(finishedDirectory, testCsvFile))
@@ -189,7 +187,7 @@ func TestMultipleJSONFileImports(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		p := &json.Parser{NameKey: "Name"}
 		err := p.Init()
 		return p, err
@@ -217,7 +215,7 @@ func TestMultipleJSONFileImports(t *testing.T) {
 	r.Stop()
 
 	// Verify that we read each JSON line once to a single metric.
-	require.Equal(t, len(acc.Metrics), 5)
+	require.Len(t, acc.Metrics, 5)
 }
 
 func TestFileTag(t *testing.T) {
@@ -240,7 +238,7 @@ func TestFileTag(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		p := &json.Parser{NameKey: "Name"}
 		err := p.Init()
 		return p, err
@@ -264,7 +262,7 @@ func TestFileTag(t *testing.T) {
 	r.Stop()
 
 	// Verify that we read each JSON line once to a single metric.
-	require.Equal(t, len(acc.Metrics), 1)
+	require.Len(t, acc.Metrics, 1)
 	for _, m := range acc.Metrics {
 		for key, value := range m.Tags {
 			require.Equal(t, r.FileTag, key)
@@ -292,7 +290,7 @@ func TestCSVNoSkipRows(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := csv.Parser{
 			HeaderRowCount: 1,
 			SkipRows:       0,
@@ -328,7 +326,7 @@ hello,80,test_name2`
 	r.Stop()
 
 	// Verify that we read both files once.
-	require.Equal(t, len(acc.Metrics), 1)
+	require.Len(t, acc.Metrics, 1)
 
 	// File should have gone back to the test directory, as we configured.
 	_, err = os.Stat(filepath.Join(finishedDirectory, testCsvFile))
@@ -361,7 +359,7 @@ func TestCSVSkipRows(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := csv.Parser{
 			HeaderRowCount: 1,
 			SkipRows:       2,
@@ -399,7 +397,7 @@ hello,80,test_name2`
 	r.Stop()
 
 	// Verify that we read both files once.
-	require.Equal(t, len(acc.Metrics), 1)
+	require.Len(t, acc.Metrics, 1)
 
 	// File should have gone back to the test directory, as we configured.
 	_, err = os.Stat(filepath.Join(finishedDirectory, testCsvFile))
@@ -432,7 +430,7 @@ func TestCSVMultiHeader(t *testing.T) {
 	err := r.Init()
 	require.NoError(t, err)
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := csv.Parser{
 			HeaderRowCount: 2,
 			TagColumns:     []string{"line1"},
@@ -468,7 +466,7 @@ hello,80,test_name2`
 	r.Stop()
 
 	// Verify that we read both files once.
-	require.Equal(t, len(acc.Metrics), 1)
+	require.Len(t, acc.Metrics, 1)
 
 	// File should have gone back to the test directory, as we configured.
 	_, err = os.Stat(filepath.Join(finishedDirectory, testCsvFile))
@@ -501,7 +499,7 @@ func TestParseCompleteFile(t *testing.T) {
 	require.NoError(t, err)
 	r.Log = testutil.Logger{}
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := &json.Parser{
 			NameKey: "name",
 			TagKeys: []string{"tag1"},
@@ -517,9 +515,11 @@ func TestParseCompleteFile(t *testing.T) {
 	}`
 
 	// Write json file to process into the 'process' directory.
-	f, _ := os.CreateTemp(processDirectory, "test.json")
-	_, _ = f.WriteString(testJSON)
-	_ = f.Close()
+	f, err := os.CreateTemp(processDirectory, "test.json")
+	require.NoError(t, err)
+	_, err = f.WriteString(testJSON)
+	require.NoError(t, err)
+	f.Close()
 
 	err = r.Start(&acc)
 	require.NoError(t, err)
@@ -553,7 +553,7 @@ func TestParseSubdirectories(t *testing.T) {
 	require.NoError(t, err)
 	r.Log = testutil.Logger{}
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := &json.Parser{
 			NameKey: "name",
 			TagKeys: []string{"tag1"},
@@ -577,8 +577,8 @@ func TestParseSubdirectories(t *testing.T) {
 	err = f.Close()
 	require.NoError(t, err)
 
-	// Write json file to process into a subdirectory in the the 'process' directory.
-	err = os.Mkdir(filepath.Join(processDirectory, "sub"), os.ModePerm)
+	// Write json file to process into a subdirectory in the 'process' directory.
+	err = os.Mkdir(filepath.Join(processDirectory, "sub"), 0750)
 	require.NoError(t, err)
 	f, err = os.Create(filepath.Join(processDirectory, "sub", testJSONFile))
 	require.NoError(t, err)
@@ -631,7 +631,7 @@ func TestParseSubdirectoriesFilesIgnore(t *testing.T) {
 	require.NoError(t, err)
 	r.Log = testutil.Logger{}
 
-	r.SetParserFunc(func() (parsers.Parser, error) {
+	r.SetParserFunc(func() (telegraf.Parser, error) {
 		parser := &json.Parser{
 			NameKey: "name",
 			TagKeys: []string{"tag1"},
@@ -655,8 +655,8 @@ func TestParseSubdirectoriesFilesIgnore(t *testing.T) {
 	err = f.Close()
 	require.NoError(t, err)
 
-	// Write json file to process into a subdirectory in the the 'process' directory.
-	err = os.Mkdir(filepath.Join(processDirectory, "sub"), os.ModePerm)
+	// Write json file to process into a subdirectory in the 'process' directory.
+	err = os.Mkdir(filepath.Join(processDirectory, "sub"), 0750)
 	require.NoError(t, err)
 	f, err = os.Create(filepath.Join(processDirectory, "sub", testJSONFile))
 	require.NoError(t, err)

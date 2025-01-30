@@ -2,12 +2,15 @@ package converter
 
 import (
 	"math"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/metric"
+	"github.com/influxdata/telegraf/testutil"
 )
 
 func TestConverter(t *testing.T) {
@@ -433,7 +436,7 @@ func TestConverter(t *testing.T) {
 			},
 		},
 		{
-			name: "from string field hexidecimal",
+			name: "from string field hexadecimal",
 			converter: &Converter{
 				Fields: &Conversion{
 					Integer:  []string{"a"},
@@ -464,18 +467,245 @@ func TestConverter(t *testing.T) {
 				),
 			},
 		},
+		{
+			name: "from unix timestamp field",
+			converter: &Converter{
+				Fields: &Conversion{
+					Timestamp:       []string{"time"},
+					TimestampFormat: "unix",
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{},
+				map[string]interface{}{
+					"a":    42.0,
+					"time": 1111111111,
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"a": 42.0,
+					},
+					time.Unix(1111111111, 0),
+				),
+			},
+		},
+		{
+			name: "from unix timestamp tag",
+			converter: &Converter{
+				Tags: &Conversion{
+					Timestamp:       []string{"time"},
+					TimestampFormat: "unix",
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{
+					"time": "1677610769",
+				},
+				map[string]interface{}{
+					"a": 41.0,
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"a": 41.0,
+					},
+					time.Unix(1677610769, 0),
+				),
+			},
+		},
+		{
+			name: "from invalid timestamp tag",
+			converter: &Converter{
+				Tags: &Conversion{
+					Timestamp:       []string{"time"},
+					TimestampFormat: "blah",
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{
+					"time": "1677610769",
+				},
+				map[string]interface{}{
+					"a": 41.0,
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{
+						"time": "1677610769",
+					},
+					map[string]interface{}{
+						"a": 41.0,
+					},
+					time.Unix(0, 0),
+				),
+			},
+		},
+		{
+			name: "from rfc3339 timestamp field",
+			converter: &Converter{
+				Fields: &Conversion{
+					Timestamp:       []string{"time"},
+					TimestampFormat: "rfc3339",
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{},
+				map[string]interface{}{
+					"a":    42.0,
+					"time": "2009-02-13T23:31:30Z",
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"a": 42.0,
+					},
+					time.Unix(1234567890, 0),
+				),
+			},
+		},
+		{
+			name: "from custom timestamp field",
+			converter: &Converter{
+				Fields: &Conversion{
+					Timestamp:       []string{"time"},
+					TimestampFormat: "2006-01-02 15:04:05 MST",
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{},
+				map[string]interface{}{
+					"a":    42.0,
+					"time": "2016-03-01 02:39:59 MST",
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"a": 42.0,
+					},
+					time.Unix(1456825199, 0),
+				),
+			},
+		},
+		{
+			name: "invalid timestamp format",
+			converter: &Converter{
+				Fields: &Conversion{
+					Timestamp:       []string{"time"},
+					TimestampFormat: "2006-01-0",
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{},
+				map[string]interface{}{
+					"a":    42.0,
+					"time": "2022-07-04 01:30:59 MST",
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"a":    42.0,
+						"time": "2022-07-04 01:30:59 MST",
+					},
+					time.Unix(0, 0),
+				),
+			},
+		},
+		{
+			name: "no timestamp format",
+			converter: &Converter{
+				Fields: &Conversion{
+					Timestamp: []string{"time"},
+				},
+			},
+			input: testutil.MustMetric(
+				"cpu",
+				map[string]string{},
+				map[string]interface{}{
+					"a":    42.0,
+					"time": "2022-07-04 01:30:59 MST",
+				},
+				time.Unix(0, 0),
+			),
+			expected: []telegraf.Metric{
+				testutil.MustMetric(
+					"cpu",
+					map[string]string{},
+					map[string]interface{}{
+						"a":    42.0,
+						"time": "2022-07-04 01:30:59 MST",
+					},
+					time.Unix(0, 0),
+				),
+			},
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.converter.Log = testutil.Logger{}
+			require.NoError(t, tt.converter.Init())
 
-			err := tt.converter.Init()
-			require.NoError(t, err)
 			actual := tt.converter.Apply(tt.input)
-
 			testutil.RequireMetricsEqual(t, tt.expected, actual)
 		})
 	}
+}
+
+func TestMultipleTimestamps(t *testing.T) {
+	c := &Converter{
+		Fields: &Conversion{
+			Timestamp:       []string{"time", "date"},
+			TimestampFormat: "2006-01-02 15:04:05 MST",
+		},
+		Log: testutil.Logger{},
+	}
+	require.NoError(t, c.Init())
+
+	input := testutil.MustMetric(
+		"cpu",
+		map[string]string{},
+		map[string]interface{}{
+			"a":    42.0,
+			"time": "1990-01-01 12:45:13 EST",
+			"date": "2016-03-01 02:39:59 MST",
+		},
+		time.Unix(0, 0),
+	)
+
+	result := c.Apply(input)
+	require.Len(t, result, 1)
+	require.Empty(t, result[0].TagList())
+	require.Len(t, result[0].FieldList(), 1)
 }
 
 func TestMeasurement(t *testing.T) {
@@ -544,11 +774,9 @@ func TestMeasurement(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.converter.Log = testutil.Logger{}
-			err := tt.converter.Init()
-			require.NoError(t, err)
+			require.NoError(t, tt.converter.Init())
 
 			actual := tt.converter.Apply(tt.input)
-
 			testutil.RequireMetricsEqual(t, tt.expected, actual)
 		})
 	}
@@ -558,6 +786,56 @@ func TestEmptyConfigInitError(t *testing.T) {
 	converter := &Converter{
 		Log: testutil.Logger{},
 	}
-	err := converter.Init()
-	require.Error(t, err)
+	require.Error(t, converter.Init())
+}
+
+func TestTracking(t *testing.T) {
+	inputRaw := []telegraf.Metric{
+		metric.New("foo", map[string]string{}, map[string]interface{}{"value": 42, "topic": "telegraf"}, time.Unix(0, 0)),
+		metric.New("bar", map[string]string{}, map[string]interface{}{"value": 42, "topic": "telegraf"}, time.Unix(0, 0)),
+		metric.New("baz", map[string]string{}, map[string]interface{}{"value": 42, "topic": "telegraf"}, time.Unix(0, 0)),
+	}
+
+	var mu sync.Mutex
+	delivered := make([]telegraf.DeliveryInfo, 0, len(inputRaw))
+	notify := func(di telegraf.DeliveryInfo) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, di)
+	}
+
+	input := make([]telegraf.Metric, 0, len(inputRaw))
+	for _, m := range inputRaw {
+		tm, _ := metric.WithTracking(m, notify)
+		input = append(input, tm)
+	}
+
+	expected := []telegraf.Metric{
+		metric.New("telegraf", map[string]string{}, map[string]interface{}{"value": 42}, time.Unix(0, 0)),
+		metric.New("telegraf", map[string]string{}, map[string]interface{}{"value": 42}, time.Unix(0, 0)),
+		metric.New("telegraf", map[string]string{}, map[string]interface{}{"value": 42}, time.Unix(0, 0)),
+	}
+
+	plugin := &Converter{
+		Fields: &Conversion{
+			Measurement: []string{"topic"},
+		},
+	}
+	require.NoError(t, plugin.Init())
+
+	// Process expected metrics and compare with resulting metrics
+	actual := plugin.Apply(input...)
+	testutil.RequireMetricsEqual(t, expected, actual)
+
+	// Simulate output acknowledging delivery
+	for _, m := range actual {
+		m.Accept()
+	}
+
+	// Check delivery
+	require.Eventuallyf(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(input) == len(delivered)
+	}, time.Second, 100*time.Millisecond, "%d delivered but %d expected", len(delivered), len(expected))
 }

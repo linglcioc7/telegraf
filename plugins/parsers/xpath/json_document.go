@@ -11,11 +11,11 @@ import (
 
 type jsonDocument struct{}
 
-func (d *jsonDocument) Parse(buf []byte) (dataNode, error) {
+func (*jsonDocument) Parse(buf []byte) (dataNode, error) {
 	return jsonquery.Parse(strings.NewReader(string(buf)))
 }
 
-func (d *jsonDocument) QueryAll(node dataNode, expr string) ([]dataNode, error) {
+func (*jsonDocument) QueryAll(node dataNode, expr string) ([]dataNode, error) {
 	// If this panics it's a programming error as we changed the document type while processing
 	native, err := jsonquery.QueryAll(node.(*jsonquery.Node), expr)
 	if err != nil {
@@ -29,7 +29,7 @@ func (d *jsonDocument) QueryAll(node dataNode, expr string) ([]dataNode, error) 
 	return nodes, nil
 }
 
-func (d *jsonDocument) CreateXPathNavigator(node dataNode) path.NodeNavigator {
+func (*jsonDocument) CreateXPathNavigator(node dataNode) path.NodeNavigator {
 	// If this panics it's a programming error as we changed the document type while processing
 	return jsonquery.CreateXPathNavigator(node.(*jsonquery.Node))
 }
@@ -44,19 +44,8 @@ func (d *jsonDocument) GetNodePath(node, relativeTo dataNode, sep string) string
 	// Climb up the tree and collect the node names
 	n := nativeNode.Parent
 	for n != nil && n != nativeRelativeTo {
-		kind := reflect.Invalid
-		if n.Parent != nil && n.Parent.Value() != nil {
-			kind = reflect.TypeOf(n.Parent.Value()).Kind()
-		}
-
-		switch kind {
-		case reflect.Slice, reflect.Array:
-			// Determine the index for array elements
-			names = append(names, d.index(n))
-		default:
-			// Use the name if not an array
-			names = append(names, n.Data)
-		}
+		nodeName := d.GetNodeName(n, sep, false)
+		names = append(names, nodeName)
 		n = n.Parent
 	}
 
@@ -73,12 +62,37 @@ func (d *jsonDocument) GetNodePath(node, relativeTo dataNode, sep string) string
 	return nodepath[:len(nodepath)-1]
 }
 
-func (d *jsonDocument) OutputXML(node dataNode) string {
+func (d *jsonDocument) GetNodeName(node dataNode, sep string, withParent bool) string {
+	// If this panics it's a programming error as we changed the document type while processing
+	nativeNode := node.(*jsonquery.Node)
+
+	name := nativeNode.Data
+
+	// Check if the node is part of an array. If so, determine the index and
+	// concatenate the parent name and the index.
+	kind := reflect.Invalid
+	if nativeNode.Parent != nil && nativeNode.Parent.Value() != nil {
+		kind = reflect.TypeOf(nativeNode.Parent.Value()).Kind()
+	}
+
+	switch kind {
+	case reflect.Slice, reflect.Array:
+		// Determine the index for array elements
+		if name == "" && nativeNode.Parent != nil && withParent {
+			name = nativeNode.Parent.Data + sep
+		}
+		return name + d.index(nativeNode)
+	}
+
+	return name
+}
+
+func (*jsonDocument) OutputXML(node dataNode) string {
 	native := node.(*jsonquery.Node)
 	return native.OutputXML()
 }
 
-func (d *jsonDocument) index(node *jsonquery.Node) string {
+func (*jsonDocument) index(node *jsonquery.Node) string {
 	idx := 0
 
 	for n := node; n.PrevSibling != nil; n = n.PrevSibling {

@@ -6,16 +6,19 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"math"
 	"net"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mdlayher/vsock"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal"
-	tlsint "github.com/influxdata/telegraf/plugins/common/tls"
+	common_tls "github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/outputs"
-	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
 //go:embed sample.conf
@@ -25,10 +28,10 @@ type SocketWriter struct {
 	ContentEncoding string `toml:"content_encoding"`
 	Address         string
 	KeepAlivePeriod *config.Duration
-	tlsint.ClientConfig
+	common_tls.ClientConfig
 	Log telegraf.Logger `toml:"-"`
 
-	serializers.Serializer
+	serializer telegraf.Serializer
 
 	encoder internal.ContentEncoder
 
@@ -39,8 +42,8 @@ func (*SocketWriter) SampleConfig() string {
 	return sampleConfig
 }
 
-func (sw *SocketWriter) SetSerializer(s serializers.Serializer) {
-	sw.Serializer = s
+func (sw *SocketWriter) SetSerializer(s telegraf.Serializer) {
+	sw.serializer = s
 }
 
 func (sw *SocketWriter) Connect() error {
@@ -55,19 +58,50 @@ func (sw *SocketWriter) Connect() error {
 	}
 
 	var c net.Conn
-	if tlsCfg == nil {
-		c, err = net.Dial(spl[0], spl[1])
+
+	if spl[0] == "vsock" {
+		addrTuple := strings.SplitN(spl[1], ":", 2)
+
+		// Check address string for containing two
+		if len(addrTuple) < 2 {
+			return errors.New("port and/or CID number missing")
+		}
+
+		// Parse CID and port number from address string both being 32-bit
+		// source: https://man7.org/linux/man-pages/man7/vsock.7.html
+		cid, err := strconv.ParseUint(addrTuple[0], 10, 32)
+		if err != nil {
+			return fmt.Errorf("failed to parse CID %s: %w", addrTuple[0], err)
+		}
+		if (cid >= uint64(math.Pow(2, 32))-1) && (cid <= 0) {
+			return fmt.Errorf("value of CID %d is out of range", cid)
+		}
+		port, err := strconv.ParseUint(addrTuple[1], 10, 32)
+		if err != nil {
+			return fmt.Errorf("failed to parse port number %s: %w", addrTuple[1], err)
+		}
+		if (port >= uint64(math.Pow(2, 32))-1) && (port <= 0) {
+			return fmt.Errorf("port number %d is out of range", port)
+		}
+		c, err = vsock.Dial(uint32(cid), uint32(port), nil)
+		if err != nil {
+			return err
+		}
 	} else {
-		c, err = tls.Dial(spl[0], spl[1], tlsCfg)
-	}
-	if err != nil {
-		return err
+		if tlsCfg == nil {
+			c, err = net.Dial(spl[0], spl[1])
+		} else {
+			c, err = tls.Dial(spl[0], spl[1], tlsCfg)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := sw.setKeepAlive(c); err != nil {
 		sw.Log.Debugf("Unable to configure keep alive (%s): %s", sw.Address, err)
 	}
-	//set encoder
+	// set encoder
 	sw.encoder, err = internal.NewContentEncoder(sw.ContentEncoding)
 	if err != nil {
 		return err
@@ -106,7 +140,7 @@ func (sw *SocketWriter) Write(metrics []telegraf.Metric) error {
 	}
 
 	for _, m := range metrics {
-		bs, err := sw.Serialize(m)
+		bs, err := sw.serializer.Serialize(m)
 		if err != nil {
 			sw.Log.Debugf("Could not serialize metric: %v", err)
 			continue
@@ -119,11 +153,11 @@ func (sw *SocketWriter) Write(metrics []telegraf.Metric) error {
 		}
 
 		if _, err := sw.Conn.Write(bs); err != nil {
-			//TODO log & keep going with remaining strings
+			// TODO log & keep going with remaining strings
 			var netErr net.Error
 			if errors.As(err, &netErr) {
 				// permanent error. close the connection
-				sw.Close() //nolint:revive // There is another error which will be returned here
+				sw.Close()
 				sw.Conn = nil
 				return fmt.Errorf("closing connection: %w", netErr)
 			}
@@ -144,13 +178,8 @@ func (sw *SocketWriter) Close() error {
 	return err
 }
 
-func newSocketWriter() *SocketWriter {
-	s := serializers.NewInfluxSerializer()
-	return &SocketWriter{
-		Serializer: s,
-	}
-}
-
 func init() {
-	outputs.Add("socket_writer", func() telegraf.Output { return newSocketWriter() })
+	outputs.Add("socket_writer", func() telegraf.Output {
+		return &SocketWriter{}
+	})
 }

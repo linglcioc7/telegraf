@@ -1,7 +1,11 @@
 # Google Cloud PubSub Output Plugin
 
-The GCP PubSub plugin publishes metrics to a [Google Cloud PubSub][pubsub] topic
-as one of the supported [output data formats][].
+This plugin publishes metrics to a [Google Cloud PubSub][pubsub] topic in one
+of the supported [data formats][data_formats].
+
+⭐ Telegraf v1.10.0
+🏷️ cloud, messaging
+💻 all
 
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
@@ -23,6 +27,10 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
 
   ## Required. Name of PubSub topic to publish metrics to.
   topic = "my-topic"
+
+  ## Content encoding for message payloads, can be set to "gzip" or
+  ## "identity" to apply no encoding.
+  # content_encoding = "identity"
 
   ## Required. Data format to consume.
   ## Each data format has its own unique set of configuration options.
@@ -61,10 +69,14 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## Optional. If true, published PubSub message data will be base64-encoded.
   # base64_data = false
 
+  ## NOTE: Due to the way TOML is parsed, tables must be at the END of the
+  ## plugin definition, otherwise additional config options are read as part of
+  ## the table
+
   ## Optional. PubSub attributes to add to metrics.
   # [outputs.cloud_pubsub.attributes]
   #   my_attr = "tag_value"
 ```
 
 [pubsub]: https://cloud.google.com/pubsub
-[output data formats]: /docs/DATA_FORMATS_OUTPUT.md
+[data_formats]: /docs/DATA_FORMATS_OUTPUT.md

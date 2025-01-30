@@ -27,16 +27,17 @@ var packageFilter = filter.MustCompile([]string{
 })
 
 type packageInfo struct {
-	Category      string
-	Plugin        string
-	Path          string
-	Tag           string
-	DefaultParser string
+	Category          string
+	Plugin            string
+	Path              string
+	Tag               string
+	DefaultParser     string
+	DefaultSerializer string
 }
 
 type packageCollection struct {
-	packages       map[string][]packageInfo
-	defaultParsers []string
+	root     string
+	packages map[string][]packageInfo
 }
 
 // Define the package exceptions
@@ -49,19 +50,11 @@ var exceptions = map[string][]packageInfo{
 			Tag:      "parsers.influx",
 		},
 	},
-	"processors": {
-		{
-			Category: "processors",
-			Plugin:   "aws_ec2",
-			Path:     "plugins/processors/aws/ec2",
-			Tag:      "processors.aws_ec2",
-		},
-	},
 }
 
 func (p *packageCollection) collectPackagesForCategory(category string) error {
 	var entries []packageInfo
-	pluginDir := filepath.Join("plugins", category)
+	pluginDir := filepath.Join(p.root, "plugins", category)
 
 	// Add exceptional packages if any
 	if pkgs, found := exceptions[category]; found {
@@ -100,25 +93,43 @@ func (p *packageCollection) collectPackagesForCategory(category string) error {
 			}
 
 			// Extract potential default parsers for input and processor packages
-			var defaultParser string
+			// as well as serializers for the output package
+			var defaultParser, defaultSerializer string
 			switch category {
-			case "inputs", "processors":
-				var err error
-				defaultParser, err = extractDefaultParser(path)
+			case "inputs":
+				dataformat, err := extractDefaultDataFormat(path)
 				if err != nil {
-					log.Printf("Getting default parser for %s.%s failed: %v", category, name, err)
+					log.Printf("Getting default data-format for %s.%s failed: %v", category, name, err)
 				}
+				defaultParser = dataformat
+			case "processors":
+				dataformat, err := extractDefaultDataFormat(path)
+				if err != nil {
+					log.Printf("Getting default data-format for %s.%s failed: %v", category, name, err)
+				}
+				defaultParser = dataformat
+				// The execd processor requires both a parser and serializer
+				if name == "execd" {
+					defaultSerializer = dataformat
+				}
+			case "outputs":
+				dataformat, err := extractDefaultDataFormat(path)
+				if err != nil {
+					log.Printf("Getting default data-format for %s.%s failed: %v", category, name, err)
+				}
+				defaultSerializer = dataformat
 			}
 
 			for _, plugin := range registeredNames {
 				path := filepath.Join("plugins", category, element.Name())
 				tag := category + "." + element.Name()
 				entries = append(entries, packageInfo{
-					Category:      category,
-					Plugin:        plugin,
-					Path:          filepath.ToSlash(path),
-					Tag:           tag,
-					DefaultParser: defaultParser,
+					Category:          category,
+					Plugin:            plugin,
+					Path:              filepath.ToSlash(path),
+					Tag:               tag,
+					DefaultParser:     defaultParser,
+					DefaultSerializer: defaultSerializer,
 				})
 			}
 		}
@@ -126,26 +137,6 @@ func (p *packageCollection) collectPackagesForCategory(category string) error {
 	p.packages[category] = entries
 
 	return nil
-}
-
-func (p *packageCollection) FillDefaultParsers() {
-	// Make sure we ignore all empty-named parsers which indicate
-	// that there is no parser used by the plugin.
-	parsers := map[string]bool{"": true}
-
-	// Iterate over all plugins that may have parsers and collect
-	// the defaults
-	p.defaultParsers = make([]string, 0)
-	for _, category := range []string{"inputs", "processors"} {
-		for _, pkg := range p.packages[category] {
-			name := pkg.DefaultParser
-			if seen := parsers[name]; seen {
-				continue
-			}
-			p.defaultParsers = append(p.defaultParsers, name)
-			parsers[name] = true
-		}
-	}
 }
 
 func (p *packageCollection) CollectAvailable() error {
@@ -156,8 +147,6 @@ func (p *packageCollection) CollectAvailable() error {
 			return err
 		}
 	}
-
-	p.FillDefaultParsers()
 
 	return nil
 }
@@ -266,6 +255,7 @@ func extractPluginInfo(file *ast.File, pluginType string, declarations map[strin
 	return registeredNames, nil
 }
 
+//nolint:staticcheck // Use deprecated ast.Package for now
 func extractPackageDeclarations(pkg *ast.Package) map[string]string {
 	declarations := make(map[string]string)
 
@@ -297,6 +287,7 @@ func extractPackageDeclarations(pkg *ast.Package) map[string]string {
 	return declarations
 }
 
+//nolint:staticcheck // Use deprecated ast.Package for now
 func extractRegisteredNames(pkg *ast.Package, pluginType string) []string {
 	var registeredNames []string
 
@@ -316,11 +307,11 @@ func extractRegisteredNames(pkg *ast.Package, pluginType string) []string {
 	return registeredNames
 }
 
-func extractDefaultParser(pluginDir string) (string, error) {
+func extractDefaultDataFormat(pluginDir string) (string, error) {
 	re := regexp.MustCompile(`^\s*#?\s*data_format\s*=\s*"(.*)"\s*$`)
 
-	// Exception for exec which uses JSON by default
-	if filepath.Base(pluginDir) == "exec" {
+	// Exception for exec input which uses JSON by default
+	if filepath.ToSlash(pluginDir) == "plugins/inputs/exec" {
 		return "json", nil
 	}
 

@@ -1,17 +1,25 @@
 package testutil
 
 import (
+	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/metric"
+	"github.com/influxdata/telegraf/plugins/serializers/influx"
 )
 
 var localhost = "localhost"
+
+const (
+	DefaultDelta   = 0.001
+	DefaultEpsilon = 0.1
+)
 
 // GetLocalHost returns the DOCKER_HOST environment variable, parsing
 // out any scheme or ports so that only the IP address is returned.
@@ -39,6 +47,13 @@ func MockMetrics() []telegraf.Metric {
 	metrics := make([]telegraf.Metric, 0)
 	// Create a new point batch
 	metrics = append(metrics, TestMetric(1.0))
+	return metrics
+}
+
+func MockMetricsWithValue(value float64) []telegraf.Metric {
+	metrics := make([]telegraf.Metric, 0)
+	// Create a new point batch
+	metrics = append(metrics, TestMetric(value))
 	return metrics
 }
 
@@ -70,4 +85,33 @@ func TestMetric(value interface{}, name ...string) telegraf.Metric {
 func OnlyTags() cmp.Option {
 	f := func(p cmp.Path) bool { return p.String() != "Tags" && p.String() != "" }
 	return cmp.FilterPath(f, cmp.Ignore())
+}
+
+func PrintMetrics(m []telegraf.Metric) {
+	s := &influx.Serializer{
+		SortFields:  true,
+		UintSupport: true,
+	}
+	if err := s.Init(); err != nil {
+		panic(err)
+	}
+	buf, err := s.SerializeBatch(m)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(buf))
+}
+
+// DefaultSampleConfig returns the sample config with the default parameters
+// uncommented to also be able to test the validity of default setting.
+func DefaultSampleConfig(sampleConfig string) []byte {
+	re := regexp.MustCompile(`(?m)(^\s+)#\s*`)
+	return []byte(re.ReplaceAllString(sampleConfig, "$1"))
+}
+
+func WithinDefaultDelta(dt float64) bool {
+	if dt < -DefaultDelta || dt > DefaultDelta {
+		return false
+	}
+	return true
 }

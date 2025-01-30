@@ -290,7 +290,7 @@ func TestGatherNotRemoveNumbers(t *testing.T) {
 	}
 }
 
-// fackeExecCommand is a helper function that mock
+// fakeExecCommand is a helper function that mock
 // the exec.Command call (and call the test binary)
 func fakeExecCommand(command string, args ...string) *exec.Cmd {
 	cs := []string{"-test.run=TestHelperProcess", "--", command}
@@ -304,7 +304,7 @@ func fakeExecCommand(command string, args ...string) *exec.Cmd {
 // For example, if you run:
 // GO_WANT_HELPER_PROCESS=1 go test -test.run=TestHelperProcess -- chrony tracking
 // it returns below mockData.
-func TestHelperProcess(_ *testing.T) {
+func TestHelperProcess(*testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}
@@ -370,13 +370,13 @@ Vcore Voltage:
 	// /tmp/go-build970079519/…/_test/integration.test -test.run=TestHelperProcess --
 	cmd, _ := args[3], args[4:]
 
-	if cmd == "sensors" {
-		fmt.Fprint(os.Stdout, mockData)
-	} else {
+	if cmd != "sensors" {
 		fmt.Fprint(os.Stdout, "command not found")
 		//nolint:revive // error code is important for this "test"
 		os.Exit(1)
 	}
+
+	fmt.Fprint(os.Stdout, mockData)
 	//nolint:revive // error code is important for this "test"
 	os.Exit(0)
 }

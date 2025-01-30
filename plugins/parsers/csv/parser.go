@@ -52,6 +52,7 @@ type Parser struct {
 	Log                telegraf.Logger `toml:"-"`
 
 	metadataSeparatorList metadataPattern
+	location              *time.Location
 
 	gotColumnNames bool
 
@@ -82,19 +83,18 @@ func (record metadataPattern) Less(i, j int) bool {
 
 func (p *Parser) initializeMetadataSeparators() error {
 	// initialize metadata
-	p.metadataTags = map[string]string{}
-	p.metadataSeparatorList = []string{}
+	p.metadataTags = make(map[string]string)
 
 	if p.MetadataRows <= 0 {
 		return nil
 	}
 
 	if len(p.MetadataSeparators) == 0 {
-		return fmt.Errorf("csv_metadata_separators required when specifying csv_metadata_rows")
+		return errors.New("csv_metadata_separators required when specifying csv_metadata_rows")
 	}
 
-	p.metadataSeparatorList = metadataPattern{}
-	patternList := map[string]bool{}
+	p.metadataSeparatorList = make(metadataPattern, 0, len(p.MetadataSeparators))
+	patternList := make(map[string]bool, len(p.MetadataSeparators))
 	for _, pattern := range p.MetadataSeparators {
 		if patternList[pattern] {
 			// Ignore further, duplicated entries
@@ -139,7 +139,7 @@ func (p *Parser) Reset() {
 
 func (p *Parser) Init() error {
 	if p.HeaderRowCount == 0 && len(p.ColumnNames) == 0 {
-		return fmt.Errorf("`csv_header_row_count` must be defined if `csv_column_names` is not specified")
+		return errors.New("`csv_header_row_count` must be defined if `csv_column_names` is not specified")
 	}
 
 	if p.Delimiter != "" {
@@ -159,7 +159,7 @@ func (p *Parser) Init() error {
 
 	p.gotInitialColumnNames = len(p.ColumnNames) > 0
 	if len(p.ColumnNames) > 0 && len(p.ColumnTypes) > 0 && len(p.ColumnNames) != len(p.ColumnTypes) {
-		return fmt.Errorf("csv_column_names field count doesn't match with csv_column_types")
+		return errors.New("csv_column_names field count doesn't match with csv_column_types")
 	}
 
 	if err := p.initializeMetadataSeparators(); err != nil {
@@ -168,6 +168,14 @@ func (p *Parser) Init() error {
 
 	if p.TimeFunc == nil {
 		p.TimeFunc = time.Now
+	}
+
+	if p.Timezone != "" {
+		loc, err := time.LoadLocation(p.Timezone)
+		if err != nil {
+			return fmt.Errorf("invalid timezone: %w", err)
+		}
+		p.location = loc
 	}
 
 	if p.ResetMode == "" {
@@ -190,16 +198,17 @@ func (p *Parser) compile(r io.Reader) *csv.Reader {
 	// ensures that the reader reads records of different lengths without an error
 	csvReader.FieldsPerRecord = -1
 	if !p.invalidDelimiter && p.Delimiter != "" {
-		csvReader.Comma = []rune(p.Delimiter)[0]
+		csvReader.Comma, _ = utf8.DecodeRuneInString(p.Delimiter)
 	}
 	// Check if delimiter is invalid
 	if p.invalidDelimiter && p.Delimiter != "" {
-		csvReader.Comma = []rune(commaByte)[0]
+		csvReader.Comma, _ = utf8.DecodeRuneInString(commaByte)
 	}
 	if p.Comment != "" {
-		csvReader.Comment = []rune(p.Comment)[0]
+		csvReader.Comment, _ = utf8.DecodeRuneInString(p.Comment)
 	}
 	csvReader.TrimLeadingSpace = p.TrimSpace
+
 	return csvReader
 }
 
@@ -294,9 +303,8 @@ func parseCSV(p *Parser, r io.Reader) ([]telegraf.Metric, error) {
 			// Ignore header lines if columns are named
 			continue
 		}
-		//concatenate header names
-		for i, h := range header {
-			name := h
+		// concatenate header names
+		for i, name := range header {
 			if p.TrimSpace {
 				name = strings.Trim(name, " ")
 			}
@@ -383,7 +391,7 @@ outer:
 			if len(p.ColumnTypes) > 0 {
 				// Throw error if current column count exceeds defined types.
 				if i >= len(p.ColumnTypes) {
-					return nil, fmt.Errorf("column type: column count exceeded")
+					return nil, errors.New("column type: column count exceeded")
 				}
 
 				var val interface{}
@@ -446,7 +454,7 @@ outer:
 		}
 	}
 
-	metricTime, err := parseTimestamp(p.TimeFunc, recordFields, p.TimestampColumn, p.TimestampFormat, p.Timezone)
+	metricTime, err := parseTimestamp(p.TimeFunc, recordFields, p.TimestampColumn, p.TimestampFormat, p.location)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +472,7 @@ outer:
 // will be the current timestamp, else it will try to parse the time according
 // to the format.
 func parseTimestamp(timeFunc func() time.Time, recordFields map[string]interface{},
-	timestampColumn, timestampFormat string, timezone string,
+	timestampColumn, timestampFormat string, timezone *time.Location,
 ) (time.Time, error) {
 	if timestampColumn != "" {
 		if recordFields[timestampColumn] == nil {
@@ -473,7 +481,7 @@ func parseTimestamp(timeFunc func() time.Time, recordFields map[string]interface
 
 		switch timestampFormat {
 		case "":
-			return time.Time{}, fmt.Errorf("timestamp format must be specified")
+			return time.Time{}, errors.New("timestamp format must be specified")
 		default:
 			metricTime, err := internal.ParseTimestamp(timestampFormat, recordFields[timestampColumn], timezone)
 			if err != nil {
@@ -496,29 +504,4 @@ func init() {
 		func(defaultMetricName string) telegraf.Parser {
 			return &Parser{MetricName: defaultMetricName}
 		})
-}
-
-func (p *Parser) InitFromConfig(config *parsers.Config) error {
-	p.HeaderRowCount = config.CSVHeaderRowCount
-	p.SkipRows = config.CSVSkipRows
-	p.SkipColumns = config.CSVSkipColumns
-	p.Delimiter = config.CSVDelimiter
-	p.Comment = config.CSVComment
-	p.TrimSpace = config.CSVTrimSpace
-	p.ColumnNames = config.CSVColumnNames
-	p.ColumnTypes = config.CSVColumnTypes
-	p.TagColumns = config.CSVTagColumns
-	p.TagOverwrite = config.CSVTagOverwrite
-	p.MeasurementColumn = config.CSVMeasurementColumn
-	p.TimestampColumn = config.CSVTimestampColumn
-	p.TimestampFormat = config.CSVTimestampFormat
-	p.Timezone = config.CSVTimezone
-	p.DefaultTags = config.DefaultTags
-	p.SkipValues = config.CSVSkipValues
-	p.MetadataRows = config.CSVMetadataRows
-	p.MetadataSeparators = config.CSVMetadataSeparators
-	p.MetadataTrimSet = config.CSVMetadataTrimSet
-	p.ResetMode = "none"
-
-	return p.Init()
 }

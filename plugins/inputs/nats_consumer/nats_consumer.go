@@ -11,20 +11,54 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/internal"
 	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	"github.com/influxdata/telegraf/plugins/parsers"
 )
 
 //go:embed sample.conf
 var sampleConfig string
 
 var (
+	once                          sync.Once
 	defaultMaxUndeliveredMessages = 1000
 )
 
-type empty struct{}
-type semaphore chan empty
+type NatsConsumer struct {
+	QueueGroup             string          `toml:"queue_group"`
+	Subjects               []string        `toml:"subjects"`
+	Servers                []string        `toml:"servers"`
+	Secure                 bool            `toml:"secure"`
+	Username               string          `toml:"username"`
+	Password               string          `toml:"password"`
+	Credentials            string          `toml:"credentials"`
+	NkeySeed               string          `toml:"nkey_seed"`
+	JsSubjects             []string        `toml:"jetstream_subjects"`
+	PendingMessageLimit    int             `toml:"pending_message_limit"`
+	PendingBytesLimit      int             `toml:"pending_bytes_limit"`
+	MaxUndeliveredMessages int             `toml:"max_undelivered_messages"`
+	Log                    telegraf.Logger `toml:"-"`
+	tls.ClientConfig
+
+	conn   *nats.Conn
+	jsConn nats.JetStreamContext
+	subs   []*nats.Subscription
+	jsSubs []*nats.Subscription
+
+	parser telegraf.Parser
+	// channel for all incoming NATS messages
+	in chan *nats.Msg
+	// channel for all NATS read errors
+	errs   chan error
+	acc    telegraf.TrackingAccumulator
+	wg     sync.WaitGroup
+	cancel context.CancelFunc
+}
+
+type (
+	empty     struct{}
+	semaphore chan empty
+)
 
 type natsError struct {
 	conn *nats.Conn
@@ -37,63 +71,17 @@ func (e natsError) Error() string {
 		e.err.Error(), e.conn.ConnectedUrl(), e.conn.ConnectedServerId(), e.sub.Subject, e.sub.Queue)
 }
 
-type natsConsumer struct {
-	QueueGroup  string   `toml:"queue_group"`
-	Subjects    []string `toml:"subjects"`
-	Servers     []string `toml:"servers"`
-	Secure      bool     `toml:"secure"`
-	Username    string   `toml:"username"`
-	Password    string   `toml:"password"`
-	Credentials string   `toml:"credentials"`
-	JsSubjects  []string `toml:"jetstream_subjects"`
-
-	tls.ClientConfig
-
-	Log telegraf.Logger
-
-	// Client pending limits:
-	PendingMessageLimit int `toml:"pending_message_limit"`
-	PendingBytesLimit   int `toml:"pending_bytes_limit"`
-
-	MaxUndeliveredMessages int `toml:"max_undelivered_messages"`
-	MetricBuffer           int `toml:"metric_buffer" deprecated:"0.10.3;2.0.0;option is ignored"`
-
-	conn   *nats.Conn
-	jsConn nats.JetStreamContext
-	subs   []*nats.Subscription
-	jsSubs []*nats.Subscription
-
-	parser parsers.Parser
-	// channel for all incoming NATS messages
-	in chan *nats.Msg
-	// channel for all NATS read errors
-	errs   chan error
-	acc    telegraf.TrackingAccumulator
-	wg     sync.WaitGroup
-	cancel context.CancelFunc
-}
-
-func (*natsConsumer) SampleConfig() string {
+func (*NatsConsumer) SampleConfig() string {
 	return sampleConfig
 }
 
-func (n *natsConsumer) SetParser(parser parsers.Parser) {
+func (n *NatsConsumer) SetParser(parser telegraf.Parser) {
 	n.parser = parser
 }
 
-func (n *natsConsumer) natsErrHandler(c *nats.Conn, s *nats.Subscription, e error) {
-	select {
-	case n.errs <- natsError{conn: c, sub: s, err: e}:
-	default:
-		return
-	}
-}
-
-// Start the nats consumer. Caller must call *natsConsumer.Stop() to clean up.
-func (n *natsConsumer) Start(acc telegraf.Accumulator) error {
+// Start the nats consumer. Caller must call *NatsConsumer.Stop() to clean up.
+func (n *NatsConsumer) Start(acc telegraf.Accumulator) error {
 	n.acc = acc.WithTracking(n.MaxUndeliveredMessages)
-
-	var connectErr error
 
 	options := []nats.Option{
 		nats.MaxReconnects(-1),
@@ -109,6 +97,14 @@ func (n *natsConsumer) Start(acc telegraf.Accumulator) error {
 		options = append(options, nats.UserCredentials(n.Credentials))
 	}
 
+	if n.NkeySeed != "" {
+		opt, err := nats.NkeyOptionFromSeed(n.NkeySeed)
+		if err != nil {
+			return err
+		}
+		options = append(options, opt)
+	}
+
 	if n.Secure {
 		tlsConfig, err := n.ClientConfig.TLSConfig()
 		if err != nil {
@@ -119,6 +115,7 @@ func (n *natsConsumer) Start(acc telegraf.Accumulator) error {
 	}
 
 	if n.conn == nil || n.conn.IsClosed() {
+		var connectErr error
 		n.conn, connectErr = nats.Connect(strings.Join(n.Servers, ","), options...)
 		if connectErr != nil {
 			return connectErr
@@ -189,9 +186,27 @@ func (n *natsConsumer) Start(acc telegraf.Accumulator) error {
 	return nil
 }
 
+func (*NatsConsumer) Gather(telegraf.Accumulator) error {
+	return nil
+}
+
+func (n *NatsConsumer) Stop() {
+	n.cancel()
+	n.wg.Wait()
+	n.clean()
+}
+
+func (n *NatsConsumer) natsErrHandler(c *nats.Conn, s *nats.Subscription, e error) {
+	select {
+	case n.errs <- natsError{conn: c, sub: s, err: e}:
+	default:
+		return
+	}
+}
+
 // receiver() reads all incoming messages from NATS, and parses them into
 // telegraf metrics.
-func (n *natsConsumer) receiver(ctx context.Context) {
+func (n *NatsConsumer) receiver(ctx context.Context) {
 	sem := make(semaphore, n.MaxUndeliveredMessages)
 
 	for {
@@ -219,14 +234,21 @@ func (n *natsConsumer) receiver(ctx context.Context) {
 					<-sem
 					continue
 				}
-
+				if len(metrics) == 0 {
+					once.Do(func() {
+						n.Log.Debug(internal.NoMetricsCreatedMsg)
+					})
+				}
+				for _, m := range metrics {
+					m.AddTag("subject", msg.Subject)
+				}
 				n.acc.AddTrackingMetricGroup(metrics)
 			}
 		}
 	}
 }
 
-func (n *natsConsumer) clean() {
+func (n *NatsConsumer) clean() {
 	for _, sub := range n.subs {
 		if err := sub.Unsubscribe(); err != nil {
 			n.Log.Errorf("Error unsubscribing from subject %s in queue %s: %s",
@@ -246,21 +268,10 @@ func (n *natsConsumer) clean() {
 	}
 }
 
-func (n *natsConsumer) Stop() {
-	n.cancel()
-	n.wg.Wait()
-	n.clean()
-}
-
-func (n *natsConsumer) Gather(_ telegraf.Accumulator) error {
-	return nil
-}
-
 func init() {
 	inputs.Add("nats_consumer", func() telegraf.Input {
-		return &natsConsumer{
+		return &NatsConsumer{
 			Servers:                []string{"nats://localhost:4222"},
-			Secure:                 false,
 			Subjects:               []string{"telegraf"},
 			QueueGroup:             "telegraf_consumers",
 			PendingBytesLimit:      nats.DefaultSubPendingBytesLimit,

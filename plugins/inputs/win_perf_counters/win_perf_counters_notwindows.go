@@ -1,3 +1,4 @@
+//go:generate ../../../tools/readme_config_includer/generator
 //go:build !windows
 
 package win_perf_counters
@@ -16,12 +17,14 @@ type WinPerfCounters struct {
 	Log telegraf.Logger `toml:"-"`
 }
 
+func (*WinPerfCounters) SampleConfig() string { return sampleConfig }
+
 func (w *WinPerfCounters) Init() error {
-	w.Log.Warn("current platform is not supported")
+	w.Log.Warn("Current platform is not supported")
 	return nil
 }
-func (w *WinPerfCounters) SampleConfig() string                { return sampleConfig }
-func (w *WinPerfCounters) Gather(_ telegraf.Accumulator) error { return nil }
+
+func (*WinPerfCounters) Gather(telegraf.Accumulator) error { return nil }
 
 func init() {
 	inputs.Add("win_perf_counters", func() telegraf.Input {

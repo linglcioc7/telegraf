@@ -29,20 +29,12 @@ func (f FileInfo) Update() error {
 	re := regexp.MustCompile(f.Regex)
 	newContents := re.ReplaceAll(b, []byte(f.Replace))
 
-	err = os.WriteFile(f.FileName, newContents, 0664)
+	err = os.WriteFile(f.FileName, newContents, 0640)
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// removeZeroPatch cleans version in case the user provides the minor version as "1.19.0" but require "1.19"
-func removeZeroPatch(version string) string {
-	if strings.HasSuffix(version, ".0") {
-		return strings.Trim(version, ".0")
-	}
-	return version
 }
 
 // removePatch cleans version from "1.20.1" to "1.20" (think go.mod entry)
@@ -53,8 +45,6 @@ func removePatch(version string) string {
 
 // findHash will search the downloads table for the hashes matching the artifacts list
 func findHashes(body io.Reader, version string) (map[string]string, error) {
-	version = removeZeroPatch(version)
-
 	htmlTokens := html.NewTokenizer(body)
 	artifacts := []string{
 		fmt.Sprintf("go%s.linux-amd64.tar.gz", version),
@@ -69,19 +59,19 @@ func findHashes(body io.Reader, version string) (map[string]string, error) {
 	for {
 		tokenType := htmlTokens.Next()
 
-		//if it's an error token, we either reached
-		//the end of the file, or the HTML was malformed
+		// if it's an error token, we either reached
+		// the end of the file, or the HTML was malformed
 		if tokenType == html.ErrorToken {
 			err := htmlTokens.Err()
 			if errors.Is(err, io.EOF) {
-				//end of the file, break out of the loop
+				// end of the file, break out of the loop
 				break
 			}
 			return nil, htmlTokens.Err()
 		}
 
 		if tokenType == html.StartTagToken {
-			//get the token
+			// get the token
 			token := htmlTokens.Token()
 			if "table" == token.Data && len(token.Attr) == 1 && token.Attr[0].Val == "downloadtable" {
 				insideDownloadTable = true
@@ -98,9 +88,9 @@ func findHashes(body io.Reader, version string) (map[string]string, error) {
 			}
 
 			if currentRow != "" && token.Data == "tt" {
-				//the next token should be the page title
+				// the next token should be the page title
 				tokenType = htmlTokens.Next()
-				//just make sure it's actually a text token
+				// just make sure it's actually a text token
 				if tokenType == html.TextToken {
 					hashes[currentRow] = htmlTokens.Token().Data
 					currentRow = ""
@@ -147,70 +137,72 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	for file, hash := range hashes {
+		fmt.Printf("%s  %s\n", hash, file)
+	}
 
-	zeroPatchVersion := removeZeroPatch(version)
 	noPatchVersion := removePatch(version)
 
 	files := []FileInfo{
 		{
 			FileName: ".circleci/config.yml",
 			Regex:    `(quay\.io\/influxdb\/telegraf-ci):(\d.\d*.\d)`,
-			Replace:  fmt.Sprintf("$1:%s", version),
-		},
-		{
-			FileName: ".github/workflows/golangci-lint.yml",
-			Regex:    `(go-version).*`,
-			Replace:  fmt.Sprintf("$1: '%s'", noPatchVersion),
-		},
-		{
-			FileName: ".github/workflows/govulncheck.yml",
-			Regex:    `(go-version).*`,
-			Replace:  fmt.Sprintf("$1: '%s'", noPatchVersion),
+			Replace:  "$1:" + version,
 		},
 		{
 			FileName: "go.mod",
 			Regex:    `(go)\s(\d.\d*)`,
-			Replace:  fmt.Sprintf("$1 %s", noPatchVersion),
+			Replace:  "$1 " + noPatchVersion,
 		},
 		{
 			FileName: "Makefile",
 			Regex:    `(quay\.io\/influxdb\/telegraf-ci):(\d.\d*.\d)`,
-			Replace:  fmt.Sprintf("$1:%s", version),
+			Replace:  "$1:" + version,
+		},
+		{
+			FileName: "README.md",
+			Regex:    `(Telegraf requires Go version) (\d.\d*)`,
+			Replace:  "$1 " + noPatchVersion,
 		},
 		{
 			FileName: "scripts/ci.docker",
 			Regex:    `(FROM golang):(\d.\d*.\d)`,
-			Replace:  fmt.Sprintf("$1:%s", zeroPatchVersion),
+			Replace:  "$1:" + version,
 		},
 		{
 			FileName: "scripts/installgo_linux.sh",
 			Regex:    `(GO_VERSION)=("\d.\d*.\d")`,
-			Replace:  fmt.Sprintf("$1=\"%s\"", zeroPatchVersion),
+			Replace:  fmt.Sprintf("$1=%q", version),
 		},
 		{
 			FileName: "scripts/installgo_mac.sh",
 			Regex:    `(GO_VERSION)=("\d.\d*.\d")`,
-			Replace:  fmt.Sprintf("$1=\"%s\"", zeroPatchVersion),
+			Replace:  fmt.Sprintf("$1=%q", version),
 		},
 		{
 			FileName: "scripts/installgo_windows.sh",
 			Regex:    `(GO_VERSION)=("\d.\d*.\d")`,
-			Replace:  fmt.Sprintf("$1=\"%s\"", zeroPatchVersion),
+			Replace:  fmt.Sprintf("$1=%q", version),
 		},
 		{
 			FileName: "scripts/installgo_linux.sh",
 			Regex:    `(GO_VERSION_SHA)=".*"`,
-			Replace:  fmt.Sprintf("$1=\"%s\"", hashes[fmt.Sprintf("go%s.linux-amd64.tar.gz", zeroPatchVersion)]),
+			Replace:  fmt.Sprintf("$1=%q", hashes[fmt.Sprintf("go%s.linux-amd64.tar.gz", version)]),
 		},
 		{
 			FileName: "scripts/installgo_mac.sh",
 			Regex:    `(GO_VERSION_SHA_arm64)=".*"`,
-			Replace:  fmt.Sprintf("$1=\"%s\"", hashes[fmt.Sprintf("go%s.darwin-arm64.tar.gz", zeroPatchVersion)]),
+			Replace:  fmt.Sprintf("$1=%q", hashes[fmt.Sprintf("go%s.darwin-arm64.tar.gz", version)]),
 		},
 		{
 			FileName: "scripts/installgo_mac.sh",
 			Regex:    `(GO_VERSION_SHA_amd64)=".*"`,
-			Replace:  fmt.Sprintf("$1=\"%s\"", hashes[fmt.Sprintf("go%s.darwin-amd64.tar.gz", zeroPatchVersion)]),
+			Replace:  fmt.Sprintf("$1=%q", hashes[fmt.Sprintf("go%s.darwin-amd64.tar.gz", version)]),
+		},
+		{
+			FileName: ".github/workflows/readme-linter.yml",
+			Regex:    `(go-version): '\d.\d*.\d'`,
+			Replace:  fmt.Sprintf("$1: '%s'", version),
 		},
 	}
 

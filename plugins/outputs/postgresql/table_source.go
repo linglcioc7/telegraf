@@ -15,7 +15,7 @@ type columnList struct {
 
 func newColumnList() *columnList {
 	return &columnList{
-		indices: map[string]int{},
+		indices: make(map[string]int),
 	}
 }
 
@@ -65,7 +65,7 @@ type TableSource struct {
 }
 
 func NewTableSources(p *Postgresql, metrics []telegraf.Metric) map[string]*TableSource {
-	tableSources := map[string]*TableSource{}
+	tableSources := make(map[string]*TableSource)
 
 	for _, m := range metrics {
 		tsrc := tableSources[m.Name()]
@@ -81,7 +81,7 @@ func NewTableSources(p *Postgresql, metrics []telegraf.Metric) map[string]*Table
 
 func NewTableSource(postgresql *Postgresql, name string) *TableSource {
 	h := fnv.New64a()
-	h.Write([]byte(name)) //nolint:revive // all Write() methods for hash in fnv.go returns nil err
+	h.Write([]byte(name))
 
 	tsrc := &TableSource{
 		postgresql:  postgresql,
@@ -133,7 +133,7 @@ func (tsrc *TableSource) TagColumns() []utils.Column {
 	var cols []utils.Column
 
 	if tsrc.postgresql.TagsAsJsonb {
-		cols = append(cols, tagsJSONColumn)
+		cols = append(cols, tsrc.postgresql.tagsJSONColumn)
 	} else {
 		cols = append(cols, tsrc.tagColumns.columns...)
 	}
@@ -149,17 +149,17 @@ func (tsrc *TableSource) FieldColumns() []utils.Column {
 // MetricTableColumns returns the full column list, including time, tag id or tags, and fields.
 func (tsrc *TableSource) MetricTableColumns() []utils.Column {
 	cols := []utils.Column{
-		timeColumn,
+		tsrc.postgresql.timeColumn,
 	}
 
 	if tsrc.postgresql.TagsAsForeignKeys {
-		cols = append(cols, tagIDColumn)
+		cols = append(cols, tsrc.postgresql.tagIDColumn)
 	} else {
 		cols = append(cols, tsrc.TagColumns()...)
 	}
 
 	if tsrc.postgresql.FieldsAsJsonb {
-		cols = append(cols, fieldsJSONColumn)
+		cols = append(cols, tsrc.postgresql.fieldsJSONColumn)
 	} else {
 		cols = append(cols, tsrc.FieldColumns()...)
 	}
@@ -169,7 +169,7 @@ func (tsrc *TableSource) MetricTableColumns() []utils.Column {
 
 func (tsrc *TableSource) TagTableColumns() []utils.Column {
 	cols := []utils.Column{
-		tagIDColumn,
+		tsrc.postgresql.tagIDColumn,
 	}
 
 	cols = append(cols, tsrc.TagColumns()...)
@@ -278,11 +278,11 @@ func (tsrc *TableSource) getValues() ([]interface{}, error) {
 			}
 			values = append(values, tagValues...)
 		} else {
-			// tags_as_foreign_key=false, tags_as_json=true
+			// tags_as_foreign_key is false and tags_as_json is true
 			values = append(values, utils.TagListToJSON(metric.TagList()))
 		}
 	} else {
-		// tags_as_foreignkey=true
+		// tags_as_foreignkey is true
 		tagID := utils.GetTagID(metric)
 		if tsrc.postgresql.ForeignTagConstraint {
 			if _, ok := tsrc.tagSets[tagID]; !ok {
@@ -294,7 +294,7 @@ func (tsrc *TableSource) getValues() ([]interface{}, error) {
 	}
 
 	if !tsrc.postgresql.FieldsAsJsonb {
-		// fields_as_json=false
+		// fields_as_json is false
 		fieldValues := make([]interface{}, len(tsrc.fieldColumns.columns))
 		fieldsEmpty := true
 		for _, field := range metric.FieldList() {
@@ -310,7 +310,7 @@ func (tsrc *TableSource) getValues() ([]interface{}, error) {
 		}
 		values = append(values, fieldValues...)
 	} else {
-		// fields_as_json=true
+		// fields_as_json is true
 		value, err := utils.FieldListToJSON(metric.FieldList())
 		if err != nil {
 			return nil, err
@@ -325,7 +325,7 @@ func (tsrc *TableSource) Values() ([]interface{}, error) {
 	return tsrc.cursorValues, tsrc.cursorError
 }
 
-func (tsrc *TableSource) Err() error {
+func (*TableSource) Err() error {
 	return nil
 }
 
@@ -365,7 +365,8 @@ func (ttsrc *TagTableSource) cacheCheck(tagID int64) bool {
 }
 func (ttsrc *TagTableSource) cacheTouch(tagID int64) {
 	key := ttsrc.tagHashSalt + tagID
-	_ = ttsrc.postgresql.tagsCache.SetInt(key, nil, 0)
+	//nolint:errcheck // unable to propagate error
+	ttsrc.postgresql.tagsCache.SetInt(key, nil, 0)
 }
 
 func (ttsrc *TagTableSource) ColumnNames() []string {
@@ -430,6 +431,6 @@ func (ttsrc *TagTableSource) UpdateCache() {
 	}
 }
 
-func (ttsrc *TagTableSource) Err() error {
+func (*TagTableSource) Err() error {
 	return nil
 }

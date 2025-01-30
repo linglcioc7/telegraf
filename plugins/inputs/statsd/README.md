@@ -2,6 +2,17 @@
 
 The StatsD input plugin gathers metrics from a Statsd server.
 
+## Service Input <!-- @/docs/includes/service_input.md -->
+
+This plugin is a service input. Normal plugins gather metrics determined by the
+interval setting. Service plugins start a service to listens and waits for
+metrics or events to occur. Service plugins have two key differences from
+normal plugins:
+
+1. The global or plugin specific `interval` setting may not apply
+2. The CLI options of `--test`, `--test-wait`, and `--once` may not produce
+   output for this plugin
+
 ## Global configuration options <!-- @/docs/includes/plugin_config.md -->
 
 In addition to the plugin-specific configuration settings, plugins support
@@ -45,16 +56,16 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## Reset timings & histograms every interval (default=true)
   delete_timings = true
 
+  ## Enable aggregation temporality adds temporality=delta or temporality=commulative tag, and
+  ## start_time field, which adds the start time of the metric accumulation.
+  ## You should use this when using OpenTelemetry output.
+  # enable_aggregation_temporality = false
+
   ## Percentiles to calculate for timing & histogram stats.
   percentiles = [50.0, 90.0, 99.0, 99.9, 99.95, 100.0]
 
   ## separator to use between elements of a statsd metric
   metric_separator = "_"
-
-  ## Parses tags in the datadog statsd format
-  ## http://docs.datadoghq.com/guides/dogstatsd/
-  ## deprecated in 1.10; use datadog_extensions option instead
-  parse_data_dog_tags = false
 
   ## Parses extensions to statsd in the datadog statsd format
   ## currently supports metrics and datadog tags.
@@ -64,6 +75,11 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## Parses distributions metric as specified in the datadog statsd format
   ## https://docs.datadoghq.com/developers/metrics/types/?tab=distribution#definition
   datadog_distributions = false
+
+  ## Keep or drop the container id as tag. Included as optional field
+  ## in DogStatsD protocol v1.2 if source is running in Kubernetes
+  ## https://docs.datadoghq.com/developers/dogstatsd/datagram_shell/?tab=metrics#dogstatsd-protocol-v12
+  datadog_keep_container_tag = false
 
   ## Statsd data translation templates, more info can be read here:
   ## https://github.com/influxdata/telegraf/blob/master/docs/TEMPLATE_PATTERN.md
@@ -94,9 +110,25 @@ See the [CONFIGURATION.md][CONFIGURATION.md] for more details.
   ## By default, telegraf will pass names directly as they are received.
   ## However, upstream statsd now does sanitization of names which can be
   ## enabled by using the "upstream" method option. This option will a) replace
-  ## white space with '_', replace '/' with '-', and remove charachters not
+  ## white space with '_', replace '/' with '-', and remove characters not
   ## matching 'a-zA-Z_\-0-9\.;='.
   #sanitize_name_method = ""
+
+  ## Replace dots (.) with underscore (_) and dashes (-) with
+  ## double underscore (__) in metric names.
+  # convert_names = false
+
+  ## Convert all numeric counters to float
+  ## Enabling this would ensure that both counters and guages are both emitted
+  ## as floats.
+  # float_counters = false
+
+  ## Emit timings `metric_<name>_count` field as float, the same as all other
+  ## histogram fields
+  # float_timings = false
+
+  ## Emit sets as float
+  # float_sets = false
 ```
 
 ## Description
@@ -234,6 +266,7 @@ measurements and tags.
 - **parse_data_dog_tags** boolean: Enable parsing of tags in DataDog's dogstatsd format (<http://docs.datadoghq.com/guides/dogstatsd/>)
 - **datadog_extensions** boolean: Enable parsing of DataDog's extensions to dogstatsd format (<http://docs.datadoghq.com/guides/dogstatsd/>)
 - **datadog_distributions** boolean: Enable parsing of the Distribution metric in DataDog's dogstatsd format (<https://docs.datadoghq.com/developers/metrics/types/?tab=distribution#definition>)
+- **datadog_keep_container_tag** boolean: Keep or drop the container id as tag. Included as optional field in DogStatsD protocol v1.2 if source is running in Kubernetes.
 - **max_ttl** config.Duration: Max duration (TTL) for each metric to stay cached/reported without being updated.
 
 ## Statsd bucket -> InfluxDB line-protocol Templates

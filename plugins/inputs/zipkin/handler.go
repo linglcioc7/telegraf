@@ -10,7 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/influxdata/telegraf/plugins/inputs/zipkin/codec"
-	"github.com/influxdata/telegraf/plugins/inputs/zipkin/codec/jsonV1"
+	json_v1 "github.com/influxdata/telegraf/plugins/inputs/zipkin/codec/jsonV1"
 	"github.com/influxdata/telegraf/plugins/inputs/zipkin/codec/thrift"
 )
 
@@ -118,13 +118,13 @@ func (s *SpanHandler) Spans(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ContentDecoer returns a Decoder that is able to produce Traces from bytes.
+// ContentDecoder returns a Decoder that is able to produce Traces from bytes.
 // Failure should yield an HTTP 415 (`http.StatusUnsupportedMediaType`)
 // If a Content-Type is not set, zipkin assumes application/json
 func ContentDecoder(r *http.Request) (codec.Decoder, error) {
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
-		return &jsonV1.JSON{}, nil
+		return &json_v1.JSON{}, nil
 	}
 
 	for _, v := range strings.Split(contentType, ",") {
@@ -133,10 +133,10 @@ func ContentDecoder(r *http.Request) (codec.Decoder, error) {
 			break
 		}
 		if t == "application/json" {
-			return &jsonV1.JSON{}, nil
+			return &json_v1.JSON{}, nil
 		} else if t == "application/x-thrift" {
 			return &thrift.Thrift{}, nil
 		}
 	}
-	return nil, fmt.Errorf("Unknown Content-Type: %s", contentType)
+	return nil, fmt.Errorf("unknown Content-Type: %s", contentType)
 }

@@ -9,20 +9,32 @@ import (
 )
 
 func collectNodes(ctx context.Context, acc telegraf.Accumulator, ki *KubernetesInventory) {
-	list, err := ki.client.getNodes(ctx)
+	list, err := ki.client.getNodes(ctx, ki.NodeName)
 	if err != nil {
 		acc.AddError(err)
 		return
 	}
-	for _, n := range list.Items {
-		ki.gatherNode(n, acc)
+
+	gatherNodeCount(len(list.Items), acc)
+
+	for i := range list.Items {
+		ki.gatherNode(&list.Items[i], acc)
 	}
 }
 
-func (ki *KubernetesInventory) gatherNode(n corev1.Node, acc telegraf.Accumulator) {
-	fields := map[string]interface{}{}
+func gatherNodeCount(count int, acc telegraf.Accumulator) {
+	fields := map[string]interface{}{"node_count": count}
+	tags := make(map[string]string)
+
+	acc.AddFields(nodeMeasurement, fields, tags)
+}
+
+func (ki *KubernetesInventory) gatherNode(n *corev1.Node, acc telegraf.Accumulator) {
+	fields := make(map[string]interface{}, len(n.Status.Capacity)+len(n.Status.Allocatable)+1)
 	tags := map[string]string{
-		"node_name": n.Name,
+		"node_name":         n.Name,
+		"cluster_namespace": n.Annotations["cluster.x-k8s.io/cluster-namespace"],
+		"version":           n.Status.NodeInfo.KubeletVersion,
 	}
 
 	for resourceName, val := range n.Status.Capacity {
@@ -48,6 +60,40 @@ func (ki *KubernetesInventory) gatherNode(n corev1.Node, acc telegraf.Accumulato
 			fields["allocatable_pods"] = atoi(val.String())
 		}
 	}
+
+	for _, val := range n.Status.Conditions {
+		conditiontags := map[string]string{
+			"status":    string(val.Status),
+			"condition": string(val.Type),
+		}
+		for k, v := range tags {
+			conditiontags[k] = v
+		}
+		running := 0
+		nodeready := 0
+		if val.Status == "True" {
+			if val.Type == "Ready" {
+				nodeready = 1
+			}
+			running = 1
+		} else if val.Status == "Unknown" {
+			if val.Type == "Ready" {
+				nodeready = 0
+			}
+			running = 2
+		}
+		conditionfields := map[string]interface{}{
+			"status_condition": running,
+			"ready":            nodeready,
+		}
+		acc.AddFields(nodeMeasurement, conditionfields, conditiontags)
+	}
+
+	unschedulable := 0
+	if n.Spec.Unschedulable {
+		unschedulable = 1
+	}
+	fields["spec_unschedulable"] = unschedulable
 
 	acc.AddFields(nodeMeasurement, fields, tags)
 }

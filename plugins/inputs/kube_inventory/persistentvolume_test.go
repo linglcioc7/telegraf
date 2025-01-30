@@ -4,16 +4,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPersistentVolume(t *testing.T) {
-	cli := &client{}
 	now := time.Now()
 	now = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 1, 36, 0, now.Location())
 
@@ -77,12 +76,10 @@ func TestPersistentVolume(t *testing.T) {
 	}
 
 	for _, v := range tests {
-		ks := &KubernetesInventory{
-			client: cli,
-		}
 		acc := new(testutil.Accumulator)
-		for _, pv := range ((v.handler.responseMap["/persistentvolumes/"]).(*corev1.PersistentVolumeList)).Items {
-			ks.gatherPersistentVolume(pv, acc)
+		items := ((v.handler.responseMap["/persistentvolumes/"]).(*corev1.PersistentVolumeList)).Items
+		for i := range items {
+			gatherPersistentVolume(&items[i], acc)
 		}
 
 		err := acc.FirstError()
